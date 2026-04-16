@@ -208,8 +208,36 @@ input[type="checkbox"] { cursor: pointer; }
     <span><strong id="selection-count">0</strong> clientes seleccionados</span>
     <div style="display:flex; gap:8px; flex-wrap:wrap;">
         <button class="btn" onclick="limpiarSeleccion()">Limpiar</button>
-        <button class="btn" onclick="marcarSeleccionados()">Marcar para seguimiento</button>
-        <button class="btn btn-wa" id="btn-wa-lote" onclick="enviarLoteWA()">📤 Enviar WA a todos</button>
+        <button class="btn" onclick="marcarSeleccionados()">Marcar seguimiento</button>
+        <button class="btn btn-wa" id="btn-wa-lote" onclick="enviarLoteWA()">📤 WA a seleccionados</button>
+        <button class="btn btn-call" id="btn-ivr-lote" onclick="enviarLoteIVR()">📞 IVR a seleccionados</button>
+    </div>
+</div>
+
+<!-- Modal de progreso de lote -->
+<div class="modal-overlay" id="modal-progreso" style="display:none;">
+    <div class="modal" style="max-width:500px;">
+        <h2 id="progreso-titulo">Procesando lote...</h2>
+        <div class="modal-info" id="progreso-info">Iniciando...</div>
+        
+        <div style="background:#f1efe8;border-radius:8px;padding:4px;margin:12px 0;">
+            <div id="progreso-barra" style="background:#185fa5;color:white;padding:6px 12px;border-radius:6px;width:0%;text-align:center;font-size:12px;min-width:40px;transition:width 0.3s;">0%</div>
+        </div>
+        
+        <div style="display:flex; gap:16px; font-size:13px; margin:8px 0;">
+            <span>✅ Enviados: <strong id="progreso-exitosos" style="color:#0F6E56">0</strong></span>
+            <span>❌ Errores: <strong id="progreso-errores" style="color:#A32D2D">0</strong></span>
+            <span>⏳ Restantes: <strong id="progreso-restantes">0</strong></span>
+        </div>
+        
+        <div id="progreso-log" style="background:#fafaf5;border:0.5px solid rgba(0,0,0,0.15);border-radius:8px;padding:10px;max-height:200px;overflow-y:auto;font-size:11px;font-family:monospace;margin:12px 0;">
+            Esperando...
+        </div>
+        
+        <div class="modal-actions">
+            <button class="btn btn-danger" id="btn-cancelar-lote" onclick="cancelarLote()">⏹ Cancelar</button>
+            <button class="btn" id="btn-cerrar-progreso" onclick="cerrarProgreso()" style="display:none;">Cerrar</button>
+        </div>
     </div>
 </div>
 
@@ -379,7 +407,10 @@ function aplicarFiltros() {
     renderTabla();
 }
 
-function renderTabla() {
+let renderBatch = 100; // Cuantos se muestran inicialmente
+let renderedCount = 100; // Cuantos estan actualmente renderizados
+
+function renderTabla(reset = true) {
     const tbody = document.getElementById('tbody');
     if (filtered.length === 0) {
         tbody.innerHTML = '<tr><td colspan="10" class="empty">No hay fantasmas que coincidan con los filtros</td></tr>';
@@ -387,8 +418,9 @@ function renderTabla() {
         return;
     }
     
-    const limit = 200;
-    const visibles = filtered.slice(0, limit);
+    if (reset) renderedCount = renderBatch;
+    
+    const visibles = filtered.slice(0, renderedCount);
     
     tbody.innerHTML = visibles.map(f => {
         const isSel = selectedTelefonos.has(f.telefono);
@@ -427,8 +459,33 @@ function renderTabla() {
         `;
     }).join('');
     
-    const truncado = filtered.length > limit ? ` (mostrando primeros ${limit})` : '';
-    document.getElementById('footer').textContent = `Mostrando ${visibles.length} de ${filtered.length} filtrados (de ${allFantasmas.length} totales)${truncado}`;
+    const restantes = filtered.length - visibles.length;
+    const footerEl = document.getElementById('footer');
+    
+    if (restantes > 0) {
+        footerEl.innerHTML = `Mostrando ${visibles.length} de ${filtered.length} filtrados (de ${allFantasmas.length} totales) · ` +
+            `<button class="btn btn-sm btn-primary" onclick="cargarMas()">Cargar ${Math.min(100, restantes)} más (quedan ${restantes})</button> ` +
+            `<button class="btn btn-sm" onclick="cargarTodos()">Ver todos</button>`;
+    } else {
+        footerEl.textContent = `Mostrando ${visibles.length} de ${filtered.length} filtrados (de ${allFantasmas.length} totales)`;
+    }
+}
+
+function cargarMas() {
+    renderedCount += 100;
+    renderTabla(false);
+    // Hacer scroll suave hacia los nuevos elementos
+    setTimeout(() => {
+        window.scrollBy({top: 400, behavior: 'smooth'});
+    }, 100);
+}
+
+function cargarTodos() {
+    if (filtered.length > 500) {
+        if (!confirm(`Vas a renderizar ${filtered.length} registros. Puede lagear el navegador en móviles. ¿Continuar?`)) return;
+    }
+    renderedCount = filtered.length;
+    renderTabla(false);
 }
 
 function toggleSeleccion(tel, cb) {
@@ -441,11 +498,16 @@ function toggleSeleccion(tel, cb) {
 }
 
 function toggleAll(cb) {
+    // Si se marca "check-all", seleccionar TODOS los filtrados (no solo los visibles)
+    if (cb.checked) {
+        filtered.forEach(f => selectedTelefonos.add(f.telefono));
+    } else {
+        filtered.forEach(f => selectedTelefonos.delete(f.telefono));
+    }
+    
+    // Actualizar checkboxes visibles en pantalla
     document.querySelectorAll('#tbody input[type="checkbox"]').forEach(c => {
         c.checked = cb.checked;
-        const tel = c.closest('tr').dataset.tel;
-        if (cb.checked) selectedTelefonos.add(tel);
-        else selectedTelefonos.delete(tel);
         const tr = c.closest('tr');
         if (cb.checked) tr.classList.add('selected');
         else tr.classList.remove('selected');
@@ -623,21 +685,86 @@ async function llamarIVR(telefono) {
     }
 }
 
+// ═══════════════════════════════════════
+// MODAL DE PROGRESO (lotes)
+// ═══════════════════════════════════════
+let loteCancelado = false;
+
+function abrirProgreso(titulo, total) {
+    loteCancelado = false;
+    document.getElementById('progreso-titulo').textContent = titulo;
+    document.getElementById('progreso-info').textContent = `0 de ${total} procesados`;
+    document.getElementById('progreso-barra').style.width = '0%';
+    document.getElementById('progreso-barra').textContent = '0%';
+    document.getElementById('progreso-exitosos').textContent = '0';
+    document.getElementById('progreso-errores').textContent = '0';
+    document.getElementById('progreso-restantes').textContent = total;
+    document.getElementById('progreso-log').innerHTML = 'Iniciando...';
+    document.getElementById('btn-cancelar-lote').style.display = 'inline-block';
+    document.getElementById('btn-cerrar-progreso').style.display = 'none';
+    document.getElementById('modal-progreso').style.display = 'flex';
+}
+
+function actualizarProgreso(i, total, exitosos, errores, mensajeLog) {
+    const pct = Math.round((i / total) * 100);
+    document.getElementById('progreso-barra').style.width = pct + '%';
+    document.getElementById('progreso-barra').textContent = pct + '%';
+    document.getElementById('progreso-info').textContent = `${i} de ${total} procesados`;
+    document.getElementById('progreso-exitosos').textContent = exitosos;
+    document.getElementById('progreso-errores').textContent = errores;
+    document.getElementById('progreso-restantes').textContent = total - i;
+    
+    if (mensajeLog) {
+        const log = document.getElementById('progreso-log');
+        const hora = new Date().toLocaleTimeString('es-MX', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+        log.innerHTML = `[${hora}] ${escapeHtml(mensajeLog)}<br>` + log.innerHTML;
+    }
+}
+
+function cancelarLote() {
+    if (confirm('¿Cancelar el lote? Se detendrán los envíos pendientes.')) {
+        loteCancelado = true;
+        document.getElementById('btn-cancelar-lote').style.display = 'none';
+        document.getElementById('progreso-log').innerHTML = 'Cancelando...<br>' + document.getElementById('progreso-log').innerHTML;
+    }
+}
+
+function finalizarProgreso(resumen) {
+    document.getElementById('progreso-info').textContent = resumen;
+    document.getElementById('btn-cancelar-lote').style.display = 'none';
+    document.getElementById('btn-cerrar-progreso').style.display = 'inline-block';
+}
+
+function cerrarProgreso() {
+    document.getElementById('modal-progreso').style.display = 'none';
+    limpiarSeleccion();
+    setTimeout(cargarDatos, 500);
+}
+
+// ═══════════════════════════════════════
+// LOTE WHATSAPP
+// ═══════════════════════════════════════
 async function enviarLoteWA() {
     if (selectedTelefonos.size === 0) return;
     if (!config.whatsappBaileys) {
         showToast('WhatsApp Auto no configurado. Configura CHATBOT_BAILEYS_URL en Render.', 'error');
         return;
     }
-    if (!confirm(`¿Enviar mensaje cordial (Paso 1) a ${selectedTelefonos.size} clientes vía Baileys?\n\nSe enviará 1 cada 30-60 seg para evitar baneo.`)) return;
     
     const seleccionados = allFantasmas.filter(f => selectedTelefonos.has(f.telefono));
+    
+    if (!confirm(`¿Enviar mensaje cordial (Paso 1) a ${seleccionados.length} clientes vía Baileys?\n\nSe enviará 1 cada 30-60 seg para evitar baneo.\nTiempo estimado: ~${Math.ceil(seleccionados.length * 0.75)} minutos`)) return;
+    
+    abrirProgreso(`Enviando WhatsApp a ${seleccionados.length} clientes`, seleccionados.length);
+    
     let enviados = 0, errores = 0;
     
-    showToast(`Enviando ${seleccionados.length} mensajes... (esto tardará varios minutos)`, '');
-    
     for (let i = 0; i < seleccionados.length; i++) {
+        if (loteCancelado) break;
+        
         const f = seleccionados[i];
+        actualizarProgreso(i, seleccionados.length, enviados, errores, `Enviando a ${f.cliente || f.telefono}...`);
+        
         try {
             const res = await fetch('/api/enviar/whatsapp-auto', {
                 method: 'POST',
@@ -651,21 +778,95 @@ async function enviarLoteWA() {
                 })
             });
             const data = await res.json();
-            if (data.success) enviados++;
-            else errores++;
+            if (data.success) {
+                enviados++;
+                actualizarProgreso(i + 1, seleccionados.length, enviados, errores, `✅ ${f.cliente || f.telefono}`);
+            } else {
+                errores++;
+                actualizarProgreso(i + 1, seleccionados.length, enviados, errores, `❌ ${f.cliente}: ${data.error || 'error'}`);
+            }
         } catch (err) {
             errores++;
+            actualizarProgreso(i + 1, seleccionados.length, enviados, errores, `❌ ${f.cliente}: ${err.message}`);
         }
         
         // Delay 30-60s entre envios (anti-baneo)
-        if (i < seleccionados.length - 1) {
+        if (i < seleccionados.length - 1 && !loteCancelado) {
             const delay = 30000 + Math.random() * 30000;
+            const restantes = seleccionados.length - i - 1;
+            const finEsperado = new Date(Date.now() + delay + (restantes * 45000));
+            actualizarProgreso(i + 1, seleccionados.length, enviados, errores, 
+                `⏱ Esperando ${Math.round(delay/1000)}s antes del siguiente... (fin estimado: ${finEsperado.toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'})})`);
             await new Promise(r => setTimeout(r, delay));
         }
     }
     
-    showToast(`Lote terminado: ${enviados} enviados, ${errores} errores`, enviados > 0 ? 'success' : 'error');
-    limpiarSeleccion();
+    const msg = loteCancelado 
+        ? `Cancelado: ${enviados} enviados, ${errores} errores, ${seleccionados.length - enviados - errores} no enviados`
+        : `Completado: ${enviados} enviados, ${errores} errores`;
+    finalizarProgreso(msg);
+}
+
+// ═══════════════════════════════════════
+// LOTE IVR (llamadas)
+// ═══════════════════════════════════════
+async function enviarLoteIVR() {
+    if (selectedTelefonos.size === 0) return;
+    if (!config.llamadaIVR) {
+        showToast('IVR no configurado. Configura IVR_ZADARMA_URL en Render.', 'error');
+        return;
+    }
+    
+    const seleccionados = allFantasmas.filter(f => selectedTelefonos.has(f.telefono));
+    
+    if (!confirm(`¿Llamar a ${seleccionados.length} clientes vía IVR?\n\nSe hará 1 llamada cada 30 seg.\nTiempo estimado: ~${Math.ceil(seleccionados.length * 0.5)} minutos\n\n⚠️ Asegúrate de tener tu PC prendida con el bridge corriendo.`)) return;
+    
+    abrirProgreso(`Llamando a ${seleccionados.length} clientes via IVR`, seleccionados.length);
+    
+    let exitosos = 0, errores = 0;
+    
+    for (let i = 0; i < seleccionados.length; i++) {
+        if (loteCancelado) break;
+        
+        const f = seleccionados[i];
+        actualizarProgreso(i, seleccionados.length, exitosos, errores, `Llamando a ${f.cliente || f.telefono}...`);
+        
+        try {
+            const res = await fetch('/api/enviar/llamada-ivr', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    telefono: f.telefono,
+                    cliente: f.cliente,
+                    saldo: f.saldo,
+                    diasAtraso: f.diasAtraso,
+                    paso: 2
+                })
+            });
+            const data = await res.json();
+            if (data.success || data.exitoso) {
+                exitosos++;
+                actualizarProgreso(i + 1, seleccionados.length, exitosos, errores, `📞 ${f.cliente || f.telefono}`);
+            } else {
+                errores++;
+                actualizarProgreso(i + 1, seleccionados.length, exitosos, errores, `❌ ${f.cliente}: ${data.error || 'error'}`);
+            }
+        } catch (err) {
+            errores++;
+            actualizarProgreso(i + 1, seleccionados.length, exitosos, errores, `❌ ${f.cliente}: ${err.message}`);
+        }
+        
+        // Delay 30 seg entre llamadas (suficiente para que suene y se cuelgue)
+        if (i < seleccionados.length - 1 && !loteCancelado) {
+            actualizarProgreso(i + 1, seleccionados.length, exitosos, errores, `⏱ Esperando 30s antes de la siguiente...`);
+            await new Promise(r => setTimeout(r, 30000));
+        }
+    }
+    
+    const msg = loteCancelado 
+        ? `Cancelado: ${exitosos} llamadas, ${errores} errores, ${seleccionados.length - exitosos - errores} no llamadas`
+        : `Completado: ${exitosos} llamadas iniciadas, ${errores} errores`;
+    finalizarProgreso(msg);
 }
 
 async function verEnFlujo() {
