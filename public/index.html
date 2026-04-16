@@ -819,7 +819,7 @@ async function enviarLoteIVR() {
     
     const seleccionados = allFantasmas.filter(f => selectedTelefonos.has(f.telefono));
     
-    if (!confirm(`¿Llamar a ${seleccionados.length} clientes vía IVR?\n\nSe hará 1 llamada cada 30 seg.\nTiempo estimado: ~${Math.ceil(seleccionados.length * 0.5)} minutos\n\n⚠️ Asegúrate de tener tu PC prendida con el bridge corriendo.`)) return;
+    if (!confirm(`¿Llamar a ${seleccionados.length} clientes vía IVR?\n\nSe hará 1 llamada cada 10 seg.\nTiempo estimado: ~${Math.ceil(seleccionados.length * 0.17)} minutos\n\n⚠️ Asegúrate de tener tu PC prendida con el bridge corriendo.`)) return;
     
     abrirProgreso(`Llamando a ${seleccionados.length} clientes via IVR`, seleccionados.length);
     
@@ -856,10 +856,10 @@ async function enviarLoteIVR() {
             actualizarProgreso(i + 1, seleccionados.length, exitosos, errores, `❌ ${f.cliente}: ${err.message}`);
         }
         
-        // Delay 30 seg entre llamadas (suficiente para que suene y se cuelgue)
+        // Delay 10 seg entre llamadas
         if (i < seleccionados.length - 1 && !loteCancelado) {
-            actualizarProgreso(i + 1, seleccionados.length, exitosos, errores, `⏱ Esperando 30s antes de la siguiente...`);
-            await new Promise(r => setTimeout(r, 30000));
+            actualizarProgreso(i + 1, seleccionados.length, exitosos, errores, `⏱ Esperando 10s antes de la siguiente...`);
+            await new Promise(r => setTimeout(r, 10000));
         }
     }
     
