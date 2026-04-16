@@ -148,6 +148,8 @@ input[type="checkbox"] { cursor: pointer; }
     <div style="display:flex; gap:8px; flex-wrap:wrap;">
         <button class="btn" id="btn-refresh" onclick="cargarDatos()">Refrescar</button>
         <button class="btn" onclick="verEnFlujo()">Ver en flujo</button>
+        <button class="btn" id="btn-verificar-wa" onclick="verificarWhatsAppMasivo()" style="background:#0F6E56;color:white;" title="Verificar qué números tienen WhatsApp">Verificar WA</button>
+        <span id="wa-estado" style="font-size:11px;color:#5f5e5a;align-self:center;"></span>
     </div>
 </div>
 
@@ -442,7 +444,7 @@ function renderTabla(reset = true) {
                 </td>
                 <td><span class="cat cat-${f.categoria}">${f.categoria}</span></td>
                 <td>${escapeHtml(f.cliente)}</td>
-                <td class="mono">${f.telefono}</td>
+                <td class="mono">${f.telefono} ${f.tiene_whatsapp === true ? '<span title="Tiene WhatsApp" style="color:#0F6E56;">✓</span>' : f.tiene_whatsapp === false ? '<span title="No tiene WhatsApp" style="color:#A32D2D;">✗</span>' : ''}</td>
                 <td class="text-right">${fmt(f.saldo)}</td>
                 <td class="text-right pct-${f.categoria}">${f.porcentajeAvance}%</td>
                 <td class="text-right">${f.diasAtraso}d</td>
@@ -753,17 +755,31 @@ async function enviarLoteWA() {
     
     const seleccionados = allFantasmas.filter(f => selectedTelefonos.has(f.telefono));
     
-    if (!confirm(`¿Enviar mensaje cordial (Paso 1) a ${seleccionados.length} clientes vía Baileys?\n\nSe enviará 1 cada 30-60 seg para evitar baneo.\nTiempo estimado: ~${Math.ceil(seleccionados.length * 0.75)} minutos`)) return;
+    // Filtrar: solo enviar a los que tienen WhatsApp (o no verificados)
+    const sinWA = seleccionados.filter(f => f.tiene_whatsapp === false);
+    const conWA = seleccionados.filter(f => f.tiene_whatsapp !== false);
     
-    abrirProgreso(`Enviando WhatsApp a ${seleccionados.length} clientes`, seleccionados.length);
+    let msgExtra = '';
+    if (sinWA.length > 0) {
+        msgExtra = `\n\n⚠️ Se omitirán ${sinWA.length} números que NO tienen WhatsApp.`;
+    }
+    
+    if (conWA.length === 0) {
+        showToast('Ninguno de los seleccionados tiene WhatsApp. Usa "Verificar WA" primero.', 'error');
+        return;
+    }
+    
+    if (!confirm(`¿Enviar mensaje cordial (Paso 1) a ${conWA.length} clientes vía Baileys?\n\nSe enviará 1 cada 30-60 seg para evitar baneo.\nTiempo estimado: ~${Math.ceil(conWA.length * 0.75)} minutos${msgExtra}`)) return;
+    
+    abrirProgreso(`Enviando WhatsApp a ${conWA.length} clientes`, conWA.length);
     
     let enviados = 0, errores = 0;
     
-    for (let i = 0; i < seleccionados.length; i++) {
+    for (let i = 0; i < conWA.length; i++) {
         if (loteCancelado) break;
         
-        const f = seleccionados[i];
-        actualizarProgreso(i, seleccionados.length, enviados, errores, `Enviando a ${f.cliente || f.telefono}...`);
+        const f = conWA[i];
+        actualizarProgreso(i, conWA.length, enviados, errores, `Enviando a ${f.cliente || f.telefono}...`);
         
         try {
             const res = await fetch('/api/enviar/whatsapp-auto', {
@@ -780,29 +796,29 @@ async function enviarLoteWA() {
             const data = await res.json();
             if (data.success) {
                 enviados++;
-                actualizarProgreso(i + 1, seleccionados.length, enviados, errores, `✅ ${f.cliente || f.telefono}`);
+                actualizarProgreso(i + 1, conWA.length, enviados, errores, `✅ ${f.cliente || f.telefono}`);
             } else {
                 errores++;
-                actualizarProgreso(i + 1, seleccionados.length, enviados, errores, `❌ ${f.cliente}: ${data.error || 'error'}`);
+                actualizarProgreso(i + 1, conWA.length, enviados, errores, `❌ ${f.cliente}: ${data.error || 'error'}`);
             }
         } catch (err) {
             errores++;
-            actualizarProgreso(i + 1, seleccionados.length, enviados, errores, `❌ ${f.cliente}: ${err.message}`);
+            actualizarProgreso(i + 1, conWA.length, enviados, errores, `❌ ${f.cliente}: ${err.message}`);
         }
         
         // Delay 30-60s entre envios (anti-baneo)
-        if (i < seleccionados.length - 1 && !loteCancelado) {
+        if (i < conWA.length - 1 && !loteCancelado) {
             const delay = 30000 + Math.random() * 30000;
-            const restantes = seleccionados.length - i - 1;
+            const restantes = conWA.length - i - 1;
             const finEsperado = new Date(Date.now() + delay + (restantes * 45000));
-            actualizarProgreso(i + 1, seleccionados.length, enviados, errores, 
+            actualizarProgreso(i + 1, conWA.length, enviados, errores, 
                 `⏱ Esperando ${Math.round(delay/1000)}s antes del siguiente... (fin estimado: ${finEsperado.toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'})})`);
             await new Promise(r => setTimeout(r, delay));
         }
     }
     
     const msg = loteCancelado 
-        ? `Cancelado: ${enviados} enviados, ${errores} errores, ${seleccionados.length - enviados - errores} no enviados`
+        ? `Cancelado: ${enviados} enviados, ${errores} errores, ${conWA.length - enviados - errores} no enviados`
         : `Completado: ${enviados} enviados, ${errores} errores`;
     finalizarProgreso(msg);
 }
@@ -869,6 +885,108 @@ async function enviarLoteIVR() {
     finalizarProgreso(msg);
 }
 
+// ═══════════════════════════════════════
+// VERIFICACION MASIVA WHATSAPP
+// ═══════════════════════════════════════
+
+async function cargarEstadoWA() {
+    try {
+        const res = await fetch('/api/verificar-whatsapp/estado');
+        const data = await res.json();
+        if (data.success) {
+            const el = document.getElementById('wa-estado');
+            if (el) {
+                const noVerif = parseInt(data.no_verificados) || 0;
+                const conWA = parseInt(data.con_wa) || 0;
+                const sinWA = parseInt(data.sin_wa) || 0;
+                if (noVerif > 0) {
+                    el.textContent = `WA: ✓${conWA} ✗${sinWA} ❓${noVerif}`;
+                } else {
+                    el.textContent = `WA: ✓${conWA} ✗${sinWA} (todos verificados)`;
+                }
+            }
+        }
+    } catch(e) { /* silencioso */ }
+}
+
+async function verificarWhatsAppMasivo() {
+    if (!config.whatsappBaileys) {
+        showToast('Bot WhatsApp no configurado. No se puede verificar.', 'error');
+        return;
+    }
+    
+    // Cargar estado actual
+    let estadoRes, estado;
+    try {
+        estadoRes = await fetch('/api/verificar-whatsapp/estado');
+        estado = await estadoRes.json();
+    } catch(e) {
+        showToast('Error al verificar estado: ' + e.message, 'error');
+        return;
+    }
+    
+    const pendientes = parseInt(estado.no_verificados) || 0;
+    if (pendientes === 0) {
+        showToast('Todos los números ya están verificados.', 'success');
+        return;
+    }
+    
+    if (!confirm(`Hay ${pendientes} números sin verificar.\n\nSe verificarán en lotes de 50 (con delay de 2s entre cada uno).\nTiempo estimado: ~${Math.ceil(pendientes * 2 / 60)} minutos.\n\n¿Iniciar verificación?`)) return;
+    
+    abrirProgreso(`Verificando WhatsApp (${pendientes} números)`, pendientes);
+    
+    let totalVerificados = 0, totalConWA = 0, totalSinWA = 0, loteNum = 0;
+    
+    while (!loteCancelado) {
+        loteNum++;
+        actualizarProgreso(totalVerificados, pendientes, totalConWA, totalSinWA, 
+            `Procesando lote ${loteNum} (50 números)...`);
+        
+        try {
+            const res = await fetch('/api/verificar-whatsapp/lote', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+            const data = await res.json();
+            
+            if (!data.success) {
+                actualizarProgreso(totalVerificados, pendientes, totalConWA, totalSinWA, 
+                    `❌ Error: ${data.error}`);
+                break;
+            }
+            
+            if (data.procesados === 0) {
+                actualizarProgreso(pendientes, pendientes, totalConWA, totalSinWA, 
+                    `✅ Todos verificados`);
+                break;
+            }
+            
+            totalVerificados += data.procesados;
+            totalConWA += (data.conWhatsApp || 0);
+            totalSinWA += (data.sinWhatsApp || 0);
+            
+            actualizarProgreso(totalVerificados, pendientes, totalConWA, totalSinWA,
+                `Lote ${loteNum}: ✓${data.conWhatsApp} con WA, ✗${data.sinWhatsApp} sin WA`);
+            
+            if (data.quedanPendientes === 0) break;
+            
+            // Pausa 5s entre lotes para no saturar
+            await new Promise(r => setTimeout(r, 5000));
+            
+        } catch(e) {
+            actualizarProgreso(totalVerificados, pendientes, totalConWA, totalSinWA,
+                `❌ Error de red: ${e.message}`);
+            break;
+        }
+    }
+    
+    const msg = loteCancelado
+        ? `Cancelado: ${totalVerificados} verificados (✓${totalConWA} con WA, ✗${totalSinWA} sin WA)`
+        : `Completado: ${totalVerificados} verificados (✓${totalConWA} con WA, ✗${totalSinWA} sin WA)`;
+    finalizarProgreso(msg);
+    
+    // Recargar datos para mostrar los indicadores
+    cargarEstadoWA();
+    cargarDatos();
+}
+
 async function verEnFlujo() {
     try {
         const res = await fetch('/api/estado-seguimiento');
@@ -894,6 +1012,7 @@ let timer;
 
 cargarConfig();
 cargarDatos();
+cargarEstadoWA();
 </script>
 
 </body>
