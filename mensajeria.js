@@ -32,40 +32,44 @@ const NUMERO_EMPRESA = process.env.NUMERO_EMPRESA || '525544621100';
 
 const PLANTILLAS_WHATSAPP = {
     paso1_cordial: (nombre, saldo) => 
-`Hola ${nombre}, le saluda LMV CREDIA.
+`Estimado(a) ${nombre}, le escribimos de *LeGaXi Asociados* por un adeudo vencido con *LMV CREDIA SA DE CV*.
 
-Le escribimos para recordarle amablemente que tiene un saldo pendiente de $${Math.round(saldo).toLocaleString('es-MX')} pesos con nosotros.
+Su saldo pendiente es de $${Math.round(saldo).toLocaleString('es-MX')} pesos.
 
-¿Podemos coordinar un pago o una visita esta semana? Sus datos están seguros y queremos apoyarle a regularizar su cuenta.
+Queremos apoyarle a regularizar su cuenta. ¿Podemos coordinar un pago o una visita de cobranza esta semana?
 
-Gracias por su atención.`,
+Quedamos atentos a su respuesta.
+LeGaXi Asociados`,
 
     paso3_firme: (nombre, saldo, dias) =>
-`${nombre}, le contactamos nuevamente desde LMV CREDIA.
+`${nombre}, le contactamos nuevamente de *LeGaXi Asociados* por su adeudo vencido con *LMV CREDIA SA DE CV*.
 
-Su saldo pendiente es de $${Math.round(saldo).toLocaleString('es-MX')} pesos con ${dias} días de atraso.
+Saldo pendiente: $${Math.round(saldo).toLocaleString('es-MX')} pesos
+Atraso: ${dias} días
 
-Necesitamos su respuesta antes del fin de semana para evitar reportar su crédito a buró. Puede contestar a este mensaje o llamarnos al 5544621100.
+Necesitamos su respuesta antes del fin de semana para evitar el reporte a buró de crédito. Puede responder este mensaje o llamarnos al 5544621100.
 
-Esperamos su pronta respuesta.`,
+LeGaXi Asociados`,
 
     paso5_urgente: (nombre, saldo, dias) =>
-`${nombre}, este es nuestro último intento de contacto amistoso desde LMV CREDIA.
+`${nombre}, este es nuestro último intento de contacto amistoso de *LeGaXi Asociados* por el adeudo vencido con *LMV CREDIA SA DE CV*.
 
 Saldo: $${Math.round(saldo).toLocaleString('es-MX')} pesos
 Atraso: ${dias} días
 
-Si no recibimos respuesta en 48 horas, su cuenta pasará a gestión legal y reporte a buró de crédito conforme a contrato firmado.
+Si no recibimos respuesta en 48 horas, su cuenta pasará a gestión legal y reporte a buró de crédito conforme al contrato firmado con Credia.
 
-Para evitarlo, contáctenos hoy mismo: 5544621100`,
+Para evitarlo, contáctenos hoy: 5544621100
+LeGaXi Asociados`,
 
     convenio_recordatorio: (nombre, monto, fecha) =>
-`Hola ${nombre}, le recordamos su próximo pago de convenio:
+`Estimado(a) ${nombre}, le escribe *LeGaXi Asociados* para recordarle su próximo pago del convenio con *LMV CREDIA SA DE CV*:
 
 Monto: $${Math.round(monto).toLocaleString('es-MX')}
 Fecha: ${fecha}
 
-LMV CREDIA agradece su cumplimiento.`
+Agradecemos su cumplimiento puntual.
+LeGaXi Asociados`
 };
 
 // ───────────────────────────────────────────────────────────────────────────
