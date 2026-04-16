@@ -350,13 +350,108 @@ app.post('/api/desmarcar-seguimiento', async (req, res) => {
 });
 
 // ───────────────────────────────────────────────────────────────────────────
+// VERIFICACION WHATSAPP - Pre-filtrado masivo
+// ───────────────────────────────────────────────────────────────────────────
+
+// Crear columna si no existe
+(async () => {
+    try {
+        await pool.query(`ALTER TABLE seguimiento_clientes ADD COLUMN IF NOT EXISTS tiene_whatsapp BOOLEAN DEFAULT NULL`);
+    } catch(e) { /* ya existe */ }
+})();
+
+// GET /api/verificar-whatsapp/estado - ¿Cuántos ya verificados?
+app.get('/api/verificar-whatsapp/estado', async (req, res) => {
+    try {
+        const r = await pool.query(`
+            SELECT 
+                COUNT(*) AS total,
+                COUNT(CASE WHEN tiene_whatsapp = true THEN 1 END) AS con_wa,
+                COUNT(CASE WHEN tiene_whatsapp = false THEN 1 END) AS sin_wa,
+                COUNT(CASE WHEN tiene_whatsapp IS NULL THEN 1 END) AS no_verificados
+            FROM seguimiento_clientes
+        `);
+        res.json({ success: true, ...r.rows[0] });
+    } catch (e) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+// POST /api/verificar-whatsapp/lote - Verifica lote de 50 y guarda resultado
+app.post('/api/verificar-whatsapp/lote', async (req, res) => {
+    try {
+        const BAILEYS_URL = process.env.CHATBOT_BAILEYS_URL || '';
+        const BAILEYS_TOKEN = process.env.CHATBOT_BAILEYS_TOKEN || '';
+        
+        if (!BAILEYS_URL) {
+            return res.status(400).json({ success: false, error: 'CHATBOT_BAILEYS_URL no configurado' });
+        }
+        
+        // Obtener 50 numeros NO verificados
+        const pendientes = await pool.query(`
+            SELECT id, telefono FROM seguimiento_clientes 
+            WHERE tiene_whatsapp IS NULL AND excluido = false
+            ORDER BY saldo DESC
+            LIMIT 50
+        `);
+        
+        if (pendientes.rows.length === 0) {
+            return res.json({ success: true, mensaje: 'Todos ya verificados', procesados: 0 });
+        }
+        
+        const telefonos = pendientes.rows.map(r => r.telefono);
+        
+        // Llamar al bot para verificar el lote
+        const verificarUrl = BAILEYS_URL.replace('/api/enviar-individual', '/api/verificar-lote');
+        const headers = { 'Content-Type': 'application/json' };
+        if (BAILEYS_TOKEN) headers['Authorization'] = `Bearer ${BAILEYS_TOKEN}`;
+        
+        const response = await fetch(verificarUrl, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ telefonos })
+        });
+        
+        const data = await response.json();
+        
+        if (!data.success || !data.resultados) {
+            return res.status(500).json({ success: false, error: data.error || 'Error del bot' });
+        }
+        
+        // Guardar resultados en PostgreSQL
+        let actualizados = 0;
+        for (const r of data.resultados) {
+            try {
+                await pool.query(
+                    `UPDATE seguimiento_clientes SET tiene_whatsapp = $1 WHERE telefono = $2`,
+                    [r.existe, r.telefono]
+                );
+                actualizados++;
+            } catch(e) { /* skip */ }
+        }
+        
+        res.json({
+            success: true,
+            procesados: data.resultados.length,
+            conWhatsApp: data.conWhatsApp,
+            sinWhatsApp: data.sinWhatsApp,
+            actualizados,
+            quedanPendientes: pendientes.rows.length < 50 ? 0 : 'más'
+        });
+        
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// ───────────────────────────────────────────────────────────────────────────
 // ARRANQUE
 // ───────────────────────────────────────────────────────────────────────────
 
 app.listen(PORT, () => {
     const config = mensajeria.getConfig();
     console.log('═══════════════════════════════════════════════════════');
-    console.log(`LeGaXi Seguimiento Fantasmas v1.2 - puerto ${PORT}`);
+    console.log(`LeGaXi Seguimiento Fantasmas v1.3 - puerto ${PORT}`);
     console.log(`Configuracion:`);
     console.log(`  DATABASE_URL:        ${process.env.DATABASE_URL ? 'OK' : 'FALTA'}`);
     console.log(`  GOOGLE_SCRIPT_URL:   ${process.env.GOOGLE_SCRIPT_URL ? 'OK' : 'FALTA'}`);
@@ -370,6 +465,8 @@ app.listen(PORT, () => {
     console.log(`  POST /api/enviar/whatsapp-link  - Genera URL wa.me`);
     console.log(`  POST /api/enviar/whatsapp-auto  - Envia via Baileys`);
     console.log(`  POST /api/enviar/llamada-ivr    - Inicia llamada IVR`);
+    console.log(`  GET  /api/verificar-whatsapp/estado - Estado verificacion`);
+    console.log(`  POST /api/verificar-whatsapp/lote   - Verificar lote de 50`);
     console.log(`  GET  /api/logs/:telefono        - Historial de un cliente`);
     console.log('═══════════════════════════════════════════════════════');
 });
