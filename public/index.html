@@ -359,6 +359,21 @@ async function cargarDatos() {
         
         allFantasmas = data.fantasmas || [];
         
+        // Enriquecer con estado de WhatsApp desde PostgreSQL
+        try {
+            const waRes = await fetch('/api/verificar-whatsapp/mapa');
+            const waData = await waRes.json();
+            if (waData.success && waData.mapa) {
+                allFantasmas.forEach(f => {
+                    if (waData.mapa[f.telefono] !== undefined) {
+                        f.tiene_whatsapp = waData.mapa[f.telefono];
+                    } else {
+                        f.tiene_whatsapp = null; // no verificado
+                    }
+                });
+            }
+        } catch(e) { /* si falla, los fantasmas quedan sin marca */ }
+        
         document.getElementById('stat-total').textContent = data.stats.fantasmas;
         document.getElementById('stat-total-sub').textContent = `de ${data.stats.totalClientes} en cartera`;
         document.getElementById('stat-activo').textContent = data.stats.porCategoria.ACTIVO;
@@ -931,19 +946,38 @@ async function verificarWhatsAppMasivo() {
         return;
     }
     
-    if (!confirm(`Hay ${pendientes} números sin verificar.\n\nSe verificarán en lotes de 50 (con delay de 2s entre cada uno).\nTiempo estimado: ~${Math.ceil(pendientes * 2 / 60)} minutos.\n\n¿Iniciar verificación?`)) return;
+    if (!confirm(`Hay ${allFantasmas.length} números para verificar.\n\nSe verificarán en lotes de 50 (con delay de 2s entre cada uno).\nTiempo estimado: ~${Math.ceil(allFantasmas.length * 2 / 60)} minutos.\n\n¿Iniciar verificación?`)) return;
     
-    abrirProgreso(`Verificando WhatsApp (${pendientes} números)`, pendientes);
+    abrirProgreso(`Verificando WhatsApp (${allFantasmas.length} números)`, allFantasmas.length);
     
     let totalVerificados = 0, totalConWA = 0, totalSinWA = 0, loteNum = 0;
+    let fantasmasEnviados = false;
     
     while (!loteCancelado) {
         loteNum++;
-        actualizarProgreso(totalVerificados, pendientes, totalConWA, totalSinWA, 
+        actualizarProgreso(totalVerificados, allFantasmas.length, totalConWA, totalSinWA, 
             `Procesando lote ${loteNum} (50 números)...`);
         
         try {
-            const res = await fetch('/api/verificar-whatsapp/lote', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+            // En el primer lote, enviar todos los fantasmas para que se inserten en DB
+            const bodyData = {};
+            if (!fantasmasEnviados) {
+                bodyData.fantasmas = allFantasmas.map(f => ({
+                    telefono: f.telefono,
+                    cliente: f.cliente,
+                    saldo: f.saldo,
+                    diasAtraso: f.diasAtraso,
+                    promotor: f.promotor,
+                    categoria: f.categoria
+                }));
+                fantasmasEnviados = true;
+            }
+            
+            const res = await fetch('/api/verificar-whatsapp/lote', { 
+                method: 'POST', 
+                headers: {'Content-Type':'application/json'}, 
+                body: JSON.stringify(bodyData)
+            });
             const data = await res.json();
             
             if (!data.success) {
