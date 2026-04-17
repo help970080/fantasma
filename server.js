@@ -298,6 +298,36 @@ app.get('/api/estado-seguimiento', async (req, res) => {
 // API: Logs de un cliente especifico
 // ───────────────────────────────────────────────────────────────────────────
 
+// GET /api/toques/mapa - Devuelve ultimo toque de cada telefono para cruzar con panel
+app.get('/api/toques/mapa', async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT DISTINCT ON (telefono)
+                telefono, canal, tipo, paso, exitoso, creado_en
+            FROM seguimiento_log
+            WHERE tipo = 'toque_enviado' AND exitoso = true
+            ORDER BY telefono, creado_en DESC
+        `);
+        
+        const mapa = {};
+        result.rows.forEach(row => {
+            const tel10 = row.telefono.slice(-10);
+            mapa[tel10] = {
+                canal: row.canal,
+                paso: row.paso,
+                fecha: row.creado_en,
+                exitoso: row.exitoso
+            };
+            // Tambien guardar con formato completo por si acaso
+            mapa[row.telefono] = mapa[tel10];
+        });
+        
+        res.json({ success: true, mapa, total: result.rows.length });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 app.get('/api/logs/:telefono', async (req, res) => {
     try {
         const tel = String(req.params.telefono).replace(/\D/g, '').slice(-10);
