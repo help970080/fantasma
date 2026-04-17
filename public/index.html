@@ -440,10 +440,13 @@ function renderTabla(reset = true) {
         const tel10 = f.telefono.slice(-10);
         const miToque = toquesMap[tel10] || toquesMap[f.telefono] || null;
         let toqueInfo = '';
-        if (miToque) {
+        if (miToque && miToque.respondio) {
+            const resp = (miToque.respuesta || '').replace(/^\[.*?\]:\s*/, '').substring(0, 30);
+            toqueInfo = `<span style="color:#0F6E56;cursor:pointer;" title="${escapeHtml(miToque.respuesta || '')}" onclick="alert('Respuesta de ${escapeHtml(f.cliente)}:\\n\\n${escapeHtml(miToque.respuesta || '')}')">💬 ${escapeHtml(resp)}${resp.length >= 30 ? '...' : ''}</span>`;
+        } else if (miToque && miToque.fecha) {
             const dias = Math.floor((Date.now() - new Date(miToque.fecha).getTime()) / 86400000);
             const canalIcon = miToque.canal === 'llamada_ivr' ? '📞' : miToque.canal === 'whatsapp_auto' ? '🚀' : '📱';
-            toqueInfo = `<span style="color:#0F6E56;" title="${new Date(miToque.fecha).toLocaleDateString('es-MX')}">${canalIcon} hace ${dias}d</span>`;
+            toqueInfo = `<span style="color:#854F0B;" title="${new Date(miToque.fecha).toLocaleDateString('es-MX')}">${canalIcon} hace ${dias}d</span>`;
         } else {
             toqueInfo = '<span style="color:#A32D2D;">sin envío</span>';
         }
