@@ -390,7 +390,7 @@ app.post('/api/verificar-whatsapp/lote', async (req, res) => {
         // Obtener 50 numeros NO verificados
         const pendientes = await pool.query(`
             SELECT id, telefono FROM seguimiento_clientes 
-            WHERE tiene_whatsapp IS NULL AND excluido = false
+            WHERE tiene_whatsapp IS NULL
             ORDER BY saldo DESC
             LIMIT 50
         `);
