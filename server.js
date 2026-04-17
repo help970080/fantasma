@@ -295,13 +295,38 @@ app.get('/api/estado-seguimiento', async (req, res) => {
 });
 
 // ───────────────────────────────────────────────────────────────────────────
+// API: Respuesta de cliente (recibida desde el bot WhatsApp)
+// ───────────────────────────────────────────────────────────────────────────
+
+app.post('/api/respuesta-cliente', async (req, res) => {
+    try {
+        const { telefono, mensaje, nombre, timestamp } = req.body;
+        if (!telefono) return res.status(400).json({ success: false, error: 'telefono requerido' });
+        
+        const tel10 = String(telefono).replace(/\D/g, '').slice(-10);
+        
+        await pool.query(`
+            INSERT INTO seguimiento_log (telefono, tipo, canal, mensaje, exitoso, disparado_por)
+            VALUES ($1, 'respuesta_recibida', 'whatsapp_auto', $2, true, 'bot_baileys')
+        `, [tel10, `[${nombre || telefono}]: ${(mensaje || '').substring(0, 500)}`]);
+        
+        console.log(`📩 Respuesta guardada de ${tel10}: ${(mensaje || '').substring(0, 50)}`);
+        
+        res.json({ success: true });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// ───────────────────────────────────────────────────────────────────────────
 // API: Logs de un cliente especifico
 // ───────────────────────────────────────────────────────────────────────────
 
-// GET /api/toques/mapa - Devuelve ultimo toque de cada telefono para cruzar con panel
+// GET /api/toques/mapa - Devuelve ultimo toque + respuesta de cada telefono
 app.get('/api/toques/mapa', async (req, res) => {
     try {
-        const result = await pool.query(`
+        // Ultimo envio exitoso por telefono
+        const envios = await pool.query(`
             SELECT DISTINCT ON (telefono)
                 telefono, canal, tipo, paso, exitoso, creado_en
             FROM seguimiento_log
@@ -309,22 +334,93 @@ app.get('/api/toques/mapa', async (req, res) => {
             ORDER BY telefono, creado_en DESC
         `);
         
+        // Ultima respuesta recibida por telefono
+        const respuestas = await pool.query(`
+            SELECT DISTINCT ON (telefono)
+                telefono, mensaje, creado_en
+            FROM seguimiento_log
+            WHERE tipo = 'respuesta_recibida'
+            ORDER BY telefono, creado_en DESC
+        `);
+        
         const mapa = {};
-        result.rows.forEach(row => {
+        envios.rows.forEach(row => {
             const tel10 = row.telefono.slice(-10);
             mapa[tel10] = {
                 canal: row.canal,
                 paso: row.paso,
                 fecha: row.creado_en,
-                exitoso: row.exitoso
+                exitoso: row.exitoso,
+                respondio: false,
+                respuesta: null
             };
-            // Tambien guardar con formato completo por si acaso
             mapa[row.telefono] = mapa[tel10];
         });
         
-        res.json({ success: true, mapa, total: result.rows.length });
+        // Agregar respuestas al mapa
+        respuestas.rows.forEach(row => {
+            const tel10 = row.telefono.slice(-10);
+            if (mapa[tel10]) {
+                mapa[tel10].respondio = true;
+                mapa[tel10].respuesta = (row.mensaje || '').substring(0, 100);
+                mapa[tel10].fechaRespuesta = row.creado_en;
+            } else {
+                // Respuesta sin envio previo (raro pero posible)
+                mapa[tel10] = {
+                    canal: 'whatsapp_auto',
+                    fecha: null,
+                    respondio: true,
+                    respuesta: (row.mensaje || '').substring(0, 100),
+                    fechaRespuesta: row.creado_en
+                };
+                mapa[row.telefono] = mapa[tel10];
+            }
+        });
+        
+        res.json({ success: true, mapa, total: envios.rows.length });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// GET /api/respuestas/mapa - Consulta respuestas del bot y devuelve mapa de quién respondió
+app.get('/api/respuestas/mapa', async (req, res) => {
+    try {
+        const BAILEYS_URL = process.env.CHATBOT_BAILEYS_URL || '';
+        const BAILEYS_TOKEN = process.env.CHATBOT_BAILEYS_TOKEN || '';
+        
+        if (!BAILEYS_URL) {
+            return res.json({ success: true, mapa: {}, total: 0 });
+        }
+        
+        const interUrl = BAILEYS_URL.replace('/api/enviar-individual', '/api/chatbot/interacciones?limite=500');
+        const headers = {};
+        if (BAILEYS_TOKEN) headers['Authorization'] = `Bearer ${BAILEYS_TOKEN}`;
+        
+        const response = await fetch(interUrl, { headers });
+        const interacciones = await response.json();
+        
+        if (!Array.isArray(interacciones)) {
+            return res.json({ success: true, mapa: {}, total: 0 });
+        }
+        
+        // Filtrar solo respuestas recibidas de clientes
+        const mapa = {};
+        interacciones
+            .filter(i => i.tipo === 'recibido')
+            .forEach(i => {
+                const tel10 = String(i.telefono).slice(-10);
+                if (!mapa[tel10] || new Date(i.timestamp) > new Date(mapa[tel10].fecha)) {
+                    mapa[tel10] = {
+                        mensaje: i.detalle || '',
+                        fecha: i.timestamp
+                    };
+                }
+            });
+        
+        res.json({ success: true, mapa, total: Object.keys(mapa).length });
+    } catch (error) {
+        res.json({ success: true, mapa: {}, total: 0 });
     }
 });
 
