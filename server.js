@@ -377,6 +377,21 @@ app.get('/api/verificar-whatsapp/estado', async (req, res) => {
     }
 });
 
+// GET /api/verificar-whatsapp/mapa - Devuelve {telefono: true/false} para cruzar con detector
+app.get('/api/verificar-whatsapp/mapa', async (req, res) => {
+    try {
+        const r = await pool.query(`
+            SELECT telefono, tiene_whatsapp FROM seguimiento_clientes 
+            WHERE tiene_whatsapp IS NOT NULL
+        `);
+        const mapa = {};
+        r.rows.forEach(row => { mapa[row.telefono] = row.tiene_whatsapp; });
+        res.json({ success: true, mapa, total: r.rows.length });
+    } catch (e) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
 // POST /api/verificar-whatsapp/lote - Verifica lote de 50 y guarda resultado
 app.post('/api/verificar-whatsapp/lote', async (req, res) => {
     try {
@@ -385,6 +400,26 @@ app.post('/api/verificar-whatsapp/lote', async (req, res) => {
         
         if (!BAILEYS_URL) {
             return res.status(400).json({ success: false, error: 'CHATBOT_BAILEYS_URL no configurado' });
+        }
+        
+        // Si se envian fantasmas en el body, insertarlos primero en seguimiento_clientes
+        const { fantasmas } = req.body || {};
+        if (fantasmas && Array.isArray(fantasmas) && fantasmas.length > 0) {
+            for (const f of fantasmas) {
+                try {
+                    // Verificar si ya existe con estado pendiente o en_curso
+                    const existe = await pool.query(
+                        `SELECT id FROM seguimiento_clientes WHERE telefono = $1 AND estado IN ('pendiente','en_curso') LIMIT 1`,
+                        [f.telefono]
+                    );
+                    if (existe.rows.length === 0) {
+                        await pool.query(`
+                            INSERT INTO seguimiento_clientes (telefono, cliente, saldo, dias_atraso, promotor, categoria, estado)
+                            VALUES ($1, $2, $3, $4, $5, $6, 'pendiente')
+                        `, [f.telefono, f.cliente || '', f.saldo || 0, f.diasAtraso || 0, f.promotor || '', f.categoria || 'FRIO']);
+                    }
+                } catch(e) { /* skip */ }
+            }
         }
         
         // Obtener 50 numeros NO verificados
