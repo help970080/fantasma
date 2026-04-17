@@ -148,8 +148,6 @@ input[type="checkbox"] { cursor: pointer; }
     <div style="display:flex; gap:8px; flex-wrap:wrap;">
         <button class="btn" id="btn-refresh" onclick="cargarDatos()">Refrescar</button>
         <button class="btn" onclick="verEnFlujo()">Ver en flujo</button>
-        <button class="btn" id="btn-verificar-wa" onclick="verificarWhatsAppMasivo()" style="background:#0F6E56;color:white;" title="Verificar qué números tienen WhatsApp">Verificar WA</button>
-        <span id="wa-estado" style="font-size:11px;color:#5f5e5a;align-self:center;"></span>
     </div>
 </div>
 
@@ -256,7 +254,7 @@ input[type="checkbox"] { cursor: pointer; }
                     <th class="text-right">% pag</th>
                     <th class="text-right">Atraso</th>
                     <th>Promotor</th>
-                    <th>Último</th>
+                    <th>Mi envío</th>
                     <th>Acciones</th>
                 </tr>
             </thead>
@@ -303,6 +301,7 @@ let filtered = [];
 let selectedTelefonos = new Set();
 let config = { whatsappLink: true, whatsappBaileys: false, llamadaIVR: false };
 let modalCliente = null;
+let toquesMap = {}; // Mapa de ultimo toque por telefono
 
 function fmt(n) { return '$' + Math.round(n).toLocaleString('es-MX'); }
 
@@ -359,20 +358,12 @@ async function cargarDatos() {
         
         allFantasmas = data.fantasmas || [];
         
-        // Enriquecer con estado de WhatsApp desde PostgreSQL
+        // Cargar mapa de toques (ultimo envio por telefono)
         try {
-            const waRes = await fetch('/api/verificar-whatsapp/mapa');
-            const waData = await waRes.json();
-            if (waData.success && waData.mapa) {
-                allFantasmas.forEach(f => {
-                    if (waData.mapa[f.telefono] !== undefined) {
-                        f.tiene_whatsapp = waData.mapa[f.telefono];
-                    } else {
-                        f.tiene_whatsapp = null; // no verificado
-                    }
-                });
-            }
-        } catch(e) { /* si falla, los fantasmas quedan sin marca */ }
+            const tRes = await fetch('/api/toques/mapa');
+            const tData = await tRes.json();
+            if (tData.success) toquesMap = tData.mapa || {};
+        } catch(e) { toquesMap = {}; }
         
         document.getElementById('stat-total').textContent = data.stats.fantasmas;
         document.getElementById('stat-total-sub').textContent = `de ${data.stats.totalClientes} en cartera`;
@@ -445,6 +436,18 @@ function renderTabla(reset = true) {
             ? `${f.ultimoContacto.tipo} ${f.ultimoContacto.dias}d`
             : (f.ultimoContacto.tipo === 'pago_historico' ? 'pagó (s/fecha)' : 'nunca');
         
+        // Info de mi ultimo toque (del mapa de seguimiento_log)
+        const tel10 = f.telefono.slice(-10);
+        const miToque = toquesMap[tel10] || toquesMap[f.telefono] || null;
+        let toqueInfo = '';
+        if (miToque) {
+            const dias = Math.floor((Date.now() - new Date(miToque.fecha).getTime()) / 86400000);
+            const canalIcon = miToque.canal === 'llamada_ivr' ? '📞' : miToque.canal === 'whatsapp_auto' ? '🚀' : '📱';
+            toqueInfo = `<span style="color:#0F6E56;" title="${new Date(miToque.fecha).toLocaleDateString('es-MX')}">${canalIcon} hace ${dias}d</span>`;
+        } else {
+            toqueInfo = '<span style="color:#A32D2D;">sin envío</span>';
+        }
+        
         const btnAuto = config.whatsappBaileys 
             ? `<button class="btn btn-sm btn-primary" onclick="abrirModal('${f.telefono}', 'auto')" title="Enviar automático">🚀</button>`
             : '';
@@ -459,12 +462,12 @@ function renderTabla(reset = true) {
                 </td>
                 <td><span class="cat cat-${f.categoria}">${f.categoria}</span></td>
                 <td>${escapeHtml(f.cliente)}</td>
-                <td class="mono">${f.telefono} ${f.tiene_whatsapp === true ? '<span title="Tiene WhatsApp" style="color:#0F6E56;">✓</span>' : f.tiene_whatsapp === false ? '<span title="No tiene WhatsApp" style="color:#A32D2D;">✗</span>' : ''}</td>
+                <td class="mono">${f.telefono}</td>
                 <td class="text-right">${fmt(f.saldo)}</td>
                 <td class="text-right pct-${f.categoria}">${f.porcentajeAvance}%</td>
                 <td class="text-right">${f.diasAtraso}d</td>
                 <td style="font-size:11px;color:#5f5e5a">${escapeHtml((f.promotor || '').substring(0, 25))}</td>
-                <td style="font-size:11px;color:#5f5e5a">${ult}</td>
+                <td style="font-size:11px;">${toqueInfo}</td>
                 <td>
                     <div class="acciones-cell">
                         <button class="btn btn-sm btn-wa" onclick="abrirModal('${f.telefono}', 'link')" title="WhatsApp manual">📱</button>
@@ -770,31 +773,17 @@ async function enviarLoteWA() {
     
     const seleccionados = allFantasmas.filter(f => selectedTelefonos.has(f.telefono));
     
-    // Filtrar: solo enviar a los que tienen WhatsApp (o no verificados)
-    const sinWA = seleccionados.filter(f => f.tiene_whatsapp === false);
-    const conWA = seleccionados.filter(f => f.tiene_whatsapp !== false);
+    if (!confirm(`¿Enviar mensaje cordial (Paso 1) a ${seleccionados.length} clientes vía Baileys?\n\nSe enviará 1 cada 30-60 seg para evitar baneo.\nTiempo estimado: ~${Math.ceil(seleccionados.length * 0.75)} minutos`)) return;
     
-    let msgExtra = '';
-    if (sinWA.length > 0) {
-        msgExtra = `\n\n⚠️ Se omitirán ${sinWA.length} números que NO tienen WhatsApp.`;
-    }
-    
-    if (conWA.length === 0) {
-        showToast('Ninguno de los seleccionados tiene WhatsApp. Usa "Verificar WA" primero.', 'error');
-        return;
-    }
-    
-    if (!confirm(`¿Enviar mensaje cordial (Paso 1) a ${conWA.length} clientes vía Baileys?\n\nSe enviará 1 cada 30-60 seg para evitar baneo.\nTiempo estimado: ~${Math.ceil(conWA.length * 0.75)} minutos${msgExtra}`)) return;
-    
-    abrirProgreso(`Enviando WhatsApp a ${conWA.length} clientes`, conWA.length);
+    abrirProgreso(`Enviando WhatsApp a ${seleccionados.length} clientes`, seleccionados.length);
     
     let enviados = 0, errores = 0;
     
-    for (let i = 0; i < conWA.length; i++) {
+    for (let i = 0; i < seleccionados.length; i++) {
         if (loteCancelado) break;
         
-        const f = conWA[i];
-        actualizarProgreso(i, conWA.length, enviados, errores, `Enviando a ${f.cliente || f.telefono}...`);
+        const f = seleccionados[i];
+        actualizarProgreso(i, seleccionados.length, enviados, errores, `Enviando a ${f.cliente || f.telefono}...`);
         
         try {
             const res = await fetch('/api/enviar/whatsapp-auto', {
@@ -811,29 +800,29 @@ async function enviarLoteWA() {
             const data = await res.json();
             if (data.success) {
                 enviados++;
-                actualizarProgreso(i + 1, conWA.length, enviados, errores, `✅ ${f.cliente || f.telefono}`);
+                actualizarProgreso(i + 1, seleccionados.length, enviados, errores, `✅ ${f.cliente || f.telefono}`);
             } else {
                 errores++;
-                actualizarProgreso(i + 1, conWA.length, enviados, errores, `❌ ${f.cliente}: ${data.error || 'error'}`);
+                actualizarProgreso(i + 1, seleccionados.length, enviados, errores, `❌ ${f.cliente}: ${data.error || 'error'}`);
             }
         } catch (err) {
             errores++;
-            actualizarProgreso(i + 1, conWA.length, enviados, errores, `❌ ${f.cliente}: ${err.message}`);
+            actualizarProgreso(i + 1, seleccionados.length, enviados, errores, `❌ ${f.cliente}: ${err.message}`);
         }
         
         // Delay 30-60s entre envios (anti-baneo)
-        if (i < conWA.length - 1 && !loteCancelado) {
+        if (i < seleccionados.length - 1 && !loteCancelado) {
             const delay = 30000 + Math.random() * 30000;
-            const restantes = conWA.length - i - 1;
+            const restantes = seleccionados.length - i - 1;
             const finEsperado = new Date(Date.now() + delay + (restantes * 45000));
-            actualizarProgreso(i + 1, conWA.length, enviados, errores, 
+            actualizarProgreso(i + 1, seleccionados.length, enviados, errores, 
                 `⏱ Esperando ${Math.round(delay/1000)}s antes del siguiente... (fin estimado: ${finEsperado.toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'})})`);
             await new Promise(r => setTimeout(r, delay));
         }
     }
     
     const msg = loteCancelado 
-        ? `Cancelado: ${enviados} enviados, ${errores} errores, ${conWA.length - enviados - errores} no enviados`
+        ? `Cancelado: ${enviados} enviados, ${errores} errores, ${seleccionados.length - enviados - errores} no enviados`
         : `Completado: ${enviados} enviados, ${errores} errores`;
     finalizarProgreso(msg);
 }
@@ -900,126 +889,6 @@ async function enviarLoteIVR() {
     finalizarProgreso(msg);
 }
 
-// ═══════════════════════════════════════
-// VERIFICACION MASIVA WHATSAPP
-// ═══════════════════════════════════════
-
-async function cargarEstadoWA() {
-    try {
-        const res = await fetch('/api/verificar-whatsapp/estado');
-        const data = await res.json();
-        if (data.success) {
-            const el = document.getElementById('wa-estado');
-            if (el) {
-                const noVerif = parseInt(data.no_verificados) || 0;
-                const conWA = parseInt(data.con_wa) || 0;
-                const sinWA = parseInt(data.sin_wa) || 0;
-                if (noVerif > 0) {
-                    el.textContent = `WA: ✓${conWA} ✗${sinWA} ❓${noVerif}`;
-                } else {
-                    el.textContent = `WA: ✓${conWA} ✗${sinWA} (todos verificados)`;
-                }
-            }
-        }
-    } catch(e) { /* silencioso */ }
-}
-
-async function verificarWhatsAppMasivo() {
-    if (!config.whatsappBaileys) {
-        showToast('Bot WhatsApp no configurado. No se puede verificar.', 'error');
-        return;
-    }
-    
-    // Cargar estado actual
-    let estadoRes, estado;
-    try {
-        estadoRes = await fetch('/api/verificar-whatsapp/estado');
-        estado = await estadoRes.json();
-    } catch(e) {
-        showToast('Error al verificar estado: ' + e.message, 'error');
-        return;
-    }
-    
-    const pendientes = parseInt(estado.no_verificados) || 0;
-    if (pendientes === 0) {
-        showToast('Todos los números ya están verificados.', 'success');
-        return;
-    }
-    
-    if (!confirm(`Hay ${allFantasmas.length} números para verificar.\n\nSe verificarán en lotes de 50 (con delay de 2s entre cada uno).\nTiempo estimado: ~${Math.ceil(allFantasmas.length * 2 / 60)} minutos.\n\n¿Iniciar verificación?`)) return;
-    
-    abrirProgreso(`Verificando WhatsApp (${allFantasmas.length} números)`, allFantasmas.length);
-    
-    let totalVerificados = 0, totalConWA = 0, totalSinWA = 0, loteNum = 0;
-    let fantasmasEnviados = false;
-    
-    while (!loteCancelado) {
-        loteNum++;
-        actualizarProgreso(totalVerificados, allFantasmas.length, totalConWA, totalSinWA, 
-            `Procesando lote ${loteNum} (50 números)...`);
-        
-        try {
-            // En el primer lote, enviar todos los fantasmas para que se inserten en DB
-            const bodyData = {};
-            if (!fantasmasEnviados) {
-                bodyData.fantasmas = allFantasmas.map(f => ({
-                    telefono: f.telefono,
-                    cliente: f.cliente,
-                    saldo: f.saldo,
-                    diasAtraso: f.diasAtraso,
-                    promotor: f.promotor,
-                    categoria: f.categoria
-                }));
-                fantasmasEnviados = true;
-            }
-            
-            const res = await fetch('/api/verificar-whatsapp/lote', { 
-                method: 'POST', 
-                headers: {'Content-Type':'application/json'}, 
-                body: JSON.stringify(bodyData)
-            });
-            const data = await res.json();
-            
-            if (!data.success) {
-                actualizarProgreso(totalVerificados, pendientes, totalConWA, totalSinWA, 
-                    `❌ Error: ${data.error}`);
-                break;
-            }
-            
-            if (data.procesados === 0) {
-                actualizarProgreso(pendientes, pendientes, totalConWA, totalSinWA, 
-                    `✅ Todos verificados`);
-                break;
-            }
-            
-            totalVerificados += data.procesados;
-            totalConWA += (data.conWhatsApp || 0);
-            totalSinWA += (data.sinWhatsApp || 0);
-            
-            actualizarProgreso(totalVerificados, pendientes, totalConWA, totalSinWA,
-                `Lote ${loteNum}: ✓${data.conWhatsApp} con WA, ✗${data.sinWhatsApp} sin WA`);
-            
-            if (data.quedanPendientes === 0) break;
-            
-            // Pausa 5s entre lotes para no saturar
-            await new Promise(r => setTimeout(r, 5000));
-            
-        } catch(e) {
-            actualizarProgreso(totalVerificados, pendientes, totalConWA, totalSinWA,
-                `❌ Error de red: ${e.message}`);
-            break;
-        }
-    }
-    
-    const msg = loteCancelado
-        ? `Cancelado: ${totalVerificados} verificados (✓${totalConWA} con WA, ✗${totalSinWA} sin WA)`
-        : `Completado: ${totalVerificados} verificados (✓${totalConWA} con WA, ✗${totalSinWA} sin WA)`;
-    finalizarProgreso(msg);
-    
-    // Recargar datos para mostrar los indicadores
-    cargarEstadoWA();
-    cargarDatos();
-}
 
 async function verEnFlujo() {
     try {
@@ -1046,7 +915,6 @@ let timer;
 
 cargarConfig();
 cargarDatos();
-cargarEstadoWA();
 </script>
 
 </body>
