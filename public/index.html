@@ -792,9 +792,29 @@ async function enviarLoteWA() {
     
     const seleccionados = allFantasmas.filter(f => selectedTelefonos.has(f.telefono));
     
-    if (!confirm(`¿Enviar mensaje cordial (Paso 1) a ${seleccionados.length} clientes vía Baileys?\n\nSe enviará 1 cada 30-60 seg para evitar baneo.\nTiempo estimado: ~${Math.ceil(seleccionados.length * 0.75)} minutos`)) return;
+    // Mostrar selector de plantilla
+    const pasoElegido = prompt(
+        `Enviar a ${seleccionados.length} clientes vía WhatsApp Auto\n\n` +
+        `Elige el tipo de mensaje:\n` +
+        `  1 = Cordial (primer recordatorio)\n` +
+        `  3 = Firme (segundo aviso)\n` +
+        `  5 = Urgente (último intento)\n\n` +
+        `Tiempo estimado: ~${Math.ceil(seleccionados.length * 0.75)} min (30-60s entre c/u)\n\n` +
+        `Escribe 1, 3 o 5:`, '1');
     
-    abrirProgreso(`Enviando WhatsApp a ${seleccionados.length} clientes`, seleccionados.length);
+    if (!pasoElegido) return; // Canceló
+    
+    const paso = parseInt(pasoElegido);
+    if (![1, 3, 5].includes(paso)) {
+        showToast('Paso inválido. Usa 1, 3 o 5.', 'error');
+        return;
+    }
+    
+    const nombres = { 1: 'Cordial', 3: 'Firme', 5: 'Urgente' };
+    
+    if (!confirm(`¿Confirmar envío "${nombres[paso]}" (Paso ${paso}) a ${seleccionados.length} clientes?`)) return;
+    
+    abrirProgreso(`Enviando WA ${nombres[paso]} a ${seleccionados.length} clientes`, seleccionados.length);
     
     let enviados = 0, errores = 0;
     
@@ -813,7 +833,7 @@ async function enviarLoteWA() {
                     cliente: f.cliente,
                     saldo: f.saldo,
                     diasAtraso: f.diasAtraso,
-                    paso: 1
+                    paso: paso
                 })
             });
             const data = await res.json();
