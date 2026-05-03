@@ -1,7 +1,14 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// SERVIDOR HTTP - LeGaXi Seguimiento de Fantasmas v1.2
+// SERVIDOR HTTP - LeGaXi Seguimiento de Fantasmas v1.4
 // 
-// NUEVO en v1.2:
+// NUEVO en v1.4:
+//   - AUTO-RUNNER: persecución automática por horas (no por días)
+//   - Cron interno cada 15 min, horario 9-20h Lun-Sáb
+//   - Pausa automática al recibir respuesta del cliente
+//   - Notificación al admin cuando alguien se agota (3 días)
+//   - Endpoints /api/auto-runner/estado, /toggle, /ejecutar-ahora
+//
+// HISTÓRICO v1.2:
 //   - Endpoints de envio: WhatsApp link, Baileys, IVR
 //   - Endpoint de plantillas (devuelve mensaje pre-armado por paso)
 //   - Endpoint de configuracion (panel sabe que botones mostrar)
@@ -15,6 +22,7 @@ const path = require('path');
 const { Pool } = require('pg');
 const { detectarFantasmas } = require('./detector');
 const mensajeria = require('./mensajeria');
+const autoRunner = require('./auto-runner');
 
 const app = express();
 const PORT = process.env.PORT || 3010;
@@ -85,8 +93,8 @@ app.post('/api/marcar-seguimiento', async (req, res) => {
                 const result = await pool.query(`
                     INSERT INTO seguimiento_clientes (
                         telefono, cliente_nombre, saldo, dias_atraso, promotor,
-                        estado, paso_actual
-                    ) VALUES ($1, $2, $3, $4, $5, 'pendiente', 0)
+                        estado, paso_actual, proximo_toque_en
+                    ) VALUES ($1, $2, $3, $4, $5, 'pendiente', 0, NOW())
                     RETURNING id
                 `, [
                     c.telefono,
@@ -606,13 +614,19 @@ app.post('/api/verificar-whatsapp/lote', async (req, res) => {
 });
 
 // ───────────────────────────────────────────────────────────────────────────
+// AUTO-RUNNER: Persecución automática por horas
+// ───────────────────────────────────────────────────────────────────────────
+
+autoRunner.montar(app, pool);
+
+// ───────────────────────────────────────────────────────────────────────────
 // ARRANQUE
 // ───────────────────────────────────────────────────────────────────────────
 
 app.listen(PORT, () => {
     const config = mensajeria.getConfig();
     console.log('═══════════════════════════════════════════════════════');
-    console.log(`LeGaXi Seguimiento Fantasmas v1.3 - puerto ${PORT}`);
+    console.log(`LeGaXi Seguimiento Fantasmas v1.4 - puerto ${PORT}`);
     console.log(`Configuracion:`);
     console.log(`  DATABASE_URL:        ${process.env.DATABASE_URL ? 'OK' : 'FALTA'}`);
     console.log(`  GOOGLE_SCRIPT_URL:   ${process.env.GOOGLE_SCRIPT_URL ? 'OK' : 'FALTA'}`);
@@ -629,5 +643,8 @@ app.listen(PORT, () => {
     console.log(`  GET  /api/verificar-whatsapp/estado - Estado verificacion`);
     console.log(`  POST /api/verificar-whatsapp/lote   - Verificar lote de 50`);
     console.log(`  GET  /api/logs/:telefono        - Historial de un cliente`);
+    console.log(`  GET  /api/auto-runner/estado    - 🤖 Estado del AutoRunner`);
+    console.log(`  POST /api/auto-runner/toggle    - 🤖 Activar/pausar AutoRunner`);
+    console.log(`  POST /api/auto-runner/ejecutar-ahora - 🤖 Forzar ciclo`);
     console.log('═══════════════════════════════════════════════════════');
 });
