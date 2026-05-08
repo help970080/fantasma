@@ -207,6 +207,9 @@ input[type="checkbox"] { cursor: pointer; }
         <option value="sin_envio">Sin envío (pendientes)</option>
         <option value="enviado">Enviado (sin respuesta)</option>
         <option value="respondio">Respondió</option>
+        <option value="en_flujo">🤖 En flujo automático</option>
+        <option value="sin_flujo">No está en flujo</option>
+        <option value="hoy">Contactado hoy</option>
     </select>
     <button class="btn" onclick="exportarExcel()" title="Exportar filtrados a Excel" style="background:#085041;color:white;">📥 Excel</button>
 </div>
@@ -473,9 +476,17 @@ function aplicarFiltros() {
         if (envioFiltro) {
             const tel10 = f.telefono.slice(-10);
             const miToque = toquesMap[tel10] || toquesMap[f.telefono] || null;
-            if (envioFiltro === 'sin_envio' && miToque) return false;
+            if (envioFiltro === 'sin_envio' && (miToque || f.en_flujo)) return false;
             if (envioFiltro === 'enviado' && (!miToque || miToque.respondio)) return false;
             if (envioFiltro === 'respondio' && (!miToque || !miToque.respondio)) return false;
+            if (envioFiltro === 'en_flujo' && !f.en_flujo) return false;
+            if (envioFiltro === 'sin_flujo' && f.en_flujo) return false;
+            if (envioFiltro === 'hoy') {
+                const hoy = new Date(); hoy.setHours(0,0,0,0);
+                const tieneToqueHoy = (miToque && miToque.fecha && new Date(miToque.fecha).getTime() >= hoy.getTime())
+                                   || (f.ultimo_toque_en && new Date(f.ultimo_toque_en).getTime() >= hoy.getTime());
+                if (!tieneToqueHoy) return false;
+            }
         }
         return true;
     });
@@ -518,6 +529,32 @@ function renderTabla(reset = true) {
             toqueInfo = '<span style="color:#A32D2D;">sin envío</span>';
         }
         
+        // Badge de flujo automatico (cliente perseguido por AutoRunner)
+        let flujoBadge = '';
+        let flujoExtra = '';
+        if (f.en_flujo) {
+            const colorEstado = f.estado_seguimiento === 'respondido' ? '#0F6E56'
+                              : f.estado_seguimiento === 'agotado' ? '#A32D2D'
+                              : '#1E5BBF';
+            const labelEstado = f.estado_seguimiento === 'respondido' ? 'Respondió'
+                              : f.estado_seguimiento === 'agotado' ? 'Agotado'
+                              : `Paso ${f.paso_actual||0}`;
+            flujoBadge = `<span style="display:inline-block;background:${colorEstado};color:white;padding:1px 6px;border-radius:8px;font-size:10px;margin-right:4px;" title="AutoRunner: ${f.estado_seguimiento}, paso ${f.paso_actual||0}">🤖 ${labelEstado}</span>`;
+            
+            // Si el toque del autorunner es mas reciente que el de toquesMap, mostrarlo
+            if (f.ultimo_toque_en) {
+                const ultAuto = new Date(f.ultimo_toque_en);
+                const dias = Math.floor((Date.now() - ultAuto.getTime()) / 86400000);
+                const horas = Math.floor((Date.now() - ultAuto.getTime()) / 3600000);
+                const tiempo = horas < 24 ? `hace ${horas}h` : `hace ${dias}d`;
+                const canalIcon = f.ultimo_toque_canal === 'llamada' ? '📞' : '💬';
+                const fechaToque = miToque && miToque.fecha ? new Date(miToque.fecha).getTime() : 0;
+                if (ultAuto.getTime() > fechaToque) {
+                    toqueInfo = `<span style="color:#1E5BBF;" title="${ultAuto.toLocaleString('es-MX')}">${canalIcon} ${tiempo} (auto)</span>`;
+                }
+            }
+        }
+        
         const btnAuto = config.whatsappBaileys 
             ? `<button class="btn btn-sm btn-primary" onclick="abrirModal('${f.telefono}', 'auto')" title="Enviar automático">🚀</button>`
             : '';
@@ -531,7 +568,7 @@ function renderTabla(reset = true) {
                     <input type="checkbox" ${isSel ? 'checked' : ''} onclick="toggleSeleccion('${f.telefono}', this)" />
                 </td>
                 <td><span class="cat cat-${f.categoria}">${f.categoria}</span></td>
-                <td>${escapeHtml(f.cliente)}</td>
+                <td>${flujoBadge}${escapeHtml(f.cliente)}</td>
                 <td class="mono">${f.telefono}</td>
                 <td class="text-right">${fmt(f.saldo)}</td>
                 <td class="text-right pct-${f.categoria}">${f.porcentajeAvance}%</td>
