@@ -248,6 +248,57 @@ input[type="checkbox"] { cursor: pointer; }
     </div>
 </div>
 
+<!-- Modal Flujo / AutoRunner -->
+<div class="modal-overlay" id="modal-flujo">
+    <div class="modal" style="max-width:1100px;width:95%;">
+        <h2>📋 Clientes en seguimiento</h2>
+        <div class="modal-info" id="flujo-info">Cargando...</div>
+        
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;align-items:center;">
+            <input type="text" id="flujo-buscar" placeholder="Buscar nombre/teléfono..." 
+                   oninput="filtrarFlujo()"
+                   style="flex:1;min-width:180px;padding:6px 10px;border:1px solid #d4d2cc;border-radius:6px;font-size:13px;" />
+            <select id="flujo-estado" onchange="filtrarFlujo()" 
+                    style="padding:6px 10px;border:1px solid #d4d2cc;border-radius:6px;font-size:13px;">
+                <option value="">Todos los estados</option>
+                <option value="pendiente">Pendiente</option>
+                <option value="en_curso">En curso</option>
+                <option value="respondido">Respondió</option>
+                <option value="agotado">Agotado</option>
+            </select>
+            <label style="display:flex;align-items:center;gap:4px;font-size:13px;">
+                <input type="checkbox" id="flujo-hoy" onchange="filtrarFlujo()" />
+                Solo contactados hoy
+            </label>
+            <span id="flujo-info-count" style="font-size:12px;color:#5f5e5a;margin-left:auto;"></span>
+        </div>
+        
+        <div style="max-height:60vh;overflow:auto;border:1px solid #e8e6df;border-radius:6px;">
+            <table style="width:100%;border-collapse:collapse;">
+                <thead style="position:sticky;top:0;background:#f7f5ef;z-index:1;">
+                    <tr style="border-bottom:1px solid #d4d2cc;">
+                        <th style="padding:8px;text-align:left;font-size:11px;">Cliente</th>
+                        <th style="padding:8px;text-align:left;font-size:11px;">Teléfono</th>
+                        <th style="padding:8px;text-align:right;font-size:11px;">Saldo</th>
+                        <th style="padding:8px;text-align:center;font-size:11px;" title="Toques realizados">Paso</th>
+                        <th style="padding:8px;text-align:center;font-size:11px;">Último toque</th>
+                        <th style="padding:8px;text-align:center;font-size:11px;">Próximo</th>
+                        <th style="padding:8px;text-align:left;font-size:11px;">Estado</th>
+                    </tr>
+                </thead>
+                <tbody id="flujo-tbody"></tbody>
+            </table>
+        </div>
+        
+        <div class="modal-actions">
+            <button class="btn" onclick="verEnFlujo()" title="Recargar datos">🔄 Refrescar</button>
+            <button class="btn" onclick="exportarFlujo()">📊 Exportar CSV</button>
+            <button class="btn" onclick="cerrarFlujo()">Cerrar</button>
+        </div>
+    </div>
+</div>
+
+
 <div class="tabla-wrapper">
     <div class="tabla-scroll">
         <table>
@@ -985,19 +1036,145 @@ function exportarExcel() {
     showToast(`${filtered.length} registros exportados a Excel`, 'success');
 }
 
+let _flujoData = [];
+
 async function verEnFlujo() {
+    const overlay = document.getElementById('modal-flujo');
+    const tbody = document.getElementById('flujo-tbody');
+    const info = document.getElementById('flujo-info');
+    
+    overlay.classList.add('show');
+    info.textContent = 'Cargando...';
+    tbody.innerHTML = '';
+    
     try {
-        const res = await fetch('/api/estado-seguimiento');
-        const data = await res.json();
-        if (!data.success) { alert('Error: ' + data.error); return; }
-        if (data.total === 0) { alert('No hay clientes en flujo todavía'); return; }
-        const lista = data.clientes.map(c => 
-            `${c.telefono} - ${c.cliente_nombre} (${fmt(c.saldo)}) - ${c.estado} paso ${c.paso_actual}`
-        ).join('\n');
-        alert(`${data.total} clientes en flujo:\n\n${lista}`);
+        // Paralelas: estado seguimiento + estado autorunner
+        const [resFlujo, resAuto] = await Promise.all([
+            fetch('/api/estado-seguimiento'),
+            fetch('/api/auto-runner/estado').catch(() => null)
+        ]);
+        
+        const dataFlujo = await resFlujo.json();
+        if (!dataFlujo.success) { 
+            info.textContent = 'Error: ' + dataFlujo.error; 
+            return; 
+        }
+        
+        _flujoData = dataFlujo.clientes || [];
+        
+        // Banner del autorunner
+        let bannerAuto = '';
+        if (resAuto) {
+            try {
+                const dAuto = await resAuto.json();
+                if (dAuto.success && dAuto.config) {
+                    const c = dAuto.config;
+                    const horario = c.enHorarioLaboral ? '🟢 trabajando' : '🌙 fuera de horario';
+                    const estado = c.activo ? (c.dryRun ? '🧪 DRY-RUN' : '✅ ACTIVO') : '⏸️ PAUSADO';
+                    bannerAuto = `AutoRunner: ${estado} · ${horario} · cada ${c.intervaloMinutos}min`;
+                    if (dAuto.stats) {
+                        bannerAuto += ` · respondieron:${dAuto.stats.respondieron} agotados:${dAuto.stats.agotados}`;
+                    }
+                }
+            } catch(e) {}
+        }
+        
+        info.innerHTML = `<strong>${_flujoData.length} clientes en flujo</strong>` + 
+                         (bannerAuto ? `<br><span style="font-size:11px;color:#5f5e5a">${bannerAuto}</span>` : '');
+        
+        renderFlujo(_flujoData);
     } catch (err) {
-        alert('Error: ' + err.message);
+        info.textContent = 'Error: ' + err.message;
     }
+}
+
+function renderFlujo(lista) {
+    const tbody = document.getElementById('flujo-tbody');
+    if (lista.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" style="padding:20px;text-align:center;color:#5f5e5a">Sin resultados</td></tr>';
+        return;
+    }
+    
+    tbody.innerHTML = lista.map(c => {
+        const ult = c.ultimo_toque_en 
+            ? new Date(c.ultimo_toque_en).toLocaleString('es-MX', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})
+            : '-';
+        const prox = c.proximo_toque_en
+            ? new Date(c.proximo_toque_en).toLocaleString('es-MX', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})
+            : '-';
+        const canalIcon = c.ultimo_toque_canal === 'llamada' ? '📞' 
+                        : c.ultimo_toque_canal === 'whatsapp' ? '💬' 
+                        : '-';
+        const estadoColor = c.estado === 'respondido' ? '#0F6E56' 
+                          : c.estado === 'agotado' ? '#A32D2D' 
+                          : '#854F0B';
+        return `<tr>
+            <td style="font-size:11px">${escapeHtml(c.cliente_nombre || '').substring(0,30)}</td>
+            <td class="mono" style="font-size:11px">${c.telefono}</td>
+            <td class="text-right" style="font-size:11px">${fmt(c.saldo)}</td>
+            <td style="text-align:center;font-size:11px"><strong>${c.paso_actual||0}</strong></td>
+            <td style="text-align:center;font-size:11px">${canalIcon} ${ult}</td>
+            <td style="text-align:center;font-size:11px;color:#5f5e5a">${prox}</td>
+            <td style="font-size:11px;color:${estadoColor}">${c.estado}</td>
+        </tr>`;
+    }).join('');
+}
+
+function filtrarFlujo() {
+    const q = document.getElementById('flujo-buscar').value.toLowerCase().trim();
+    const fEstado = document.getElementById('flujo-estado').value;
+    const fHoy = document.getElementById('flujo-hoy').checked;
+    
+    const hoy = new Date();
+    hoy.setHours(0, 0, 0, 0);
+    const hoyMs = hoy.getTime();
+    
+    let lista = _flujoData;
+    if (q) {
+        lista = lista.filter(c => 
+            (c.cliente_nombre || '').toLowerCase().includes(q) ||
+            (c.telefono || '').includes(q)
+        );
+    }
+    if (fEstado) {
+        lista = lista.filter(c => c.estado === fEstado);
+    }
+    if (fHoy) {
+        lista = lista.filter(c => {
+            if (!c.ultimo_toque_en) return false;
+            return new Date(c.ultimo_toque_en).getTime() >= hoyMs;
+        });
+    }
+    
+    document.getElementById('flujo-info-count').textContent = `${lista.length} de ${_flujoData.length}`;
+    renderFlujo(lista);
+}
+
+function cerrarFlujo() {
+    document.getElementById('modal-flujo').classList.remove('show');
+}
+
+async function exportarFlujo() {
+    if (_flujoData.length === 0) { alert('No hay datos'); return; }
+    const headers = ['Telefono','Cliente','Saldo','DiasAtraso','Promotor','Estado','Paso','UltimoCanal','UltimoToque','ProximoToque'];
+    const rows = _flujoData.map(c => [
+        c.telefono, 
+        (c.cliente_nombre||'').replace(/[",\n]/g,' '),
+        c.saldo,
+        c.dias_atraso,
+        (c.promotor||'').replace(/[",\n]/g,' '),
+        c.estado,
+        c.paso_actual||0,
+        c.ultimo_toque_canal||'',
+        c.ultimo_toque_en||'',
+        c.proximo_toque_en||''
+    ]);
+    const csv = [headers.join(','), ...rows.map(r => r.map(v => `"${v}"`).join(','))].join('\n');
+    const blob = new Blob(['\ufeff'+csv], {type:'text/csv;charset=utf-8'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `flujo_seguimiento_${new Date().toISOString().slice(0,10)}.csv`;
+    a.click();
 }
 
 let timer;
