@@ -58,6 +58,74 @@ app.get('/api/config', (req, res) => {
 app.get('/api/detectar', async (req, res) => {
     try {
         const resultado = await detectarFantasmas();
+        
+        // Mejora: incluir clientes que estan en flujo activo del AutoRunner
+        // El detector los excluye por defecto. Los recuperamos para que aparezcan
+        // en el panel principal con la info de seguimiento.
+        try {
+            const enFlujo = await pool.query(`
+                SELECT 
+                    telefono, cliente_nombre, saldo, dias_atraso, promotor,
+                    estado, paso_actual, ultimo_toque_canal, ultimo_toque_en, 
+                    proximo_toque_en, tiene_whatsapp
+                FROM seguimiento_clientes
+                WHERE estado IN ('pendiente', 'en_curso', 'respondido', 'agotado')
+            `);
+            
+            // Indexar fantasmas existentes por telefono para no duplicar
+            const fantasmasArr = resultado.fantasmas || [];
+            const indiceTel = new Set(fantasmasArr.map(f => f.telefono));
+            
+            // Por cada cliente en flujo:
+            //  - Si ya esta en fantasmas: enriquecerlo con info de seguimiento
+            //  - Si no esta: agregarlo (fue excluido por estar en flujo)
+            const flujoStats = { enriquecidos: 0, agregados: 0 };
+            
+            for (const c of enFlujo.rows) {
+                const flujoInfo = {
+                    en_flujo: true,
+                    estado_seguimiento: c.estado,
+                    paso_actual: c.paso_actual || 0,
+                    ultimo_toque_canal: c.ultimo_toque_canal,
+                    ultimo_toque_en: c.ultimo_toque_en,
+                    proximo_toque_en: c.proximo_toque_en,
+                    tiene_whatsapp: c.tiene_whatsapp
+                };
+                
+                if (indiceTel.has(c.telefono)) {
+                    // Enriquecer fantasma existente
+                    const f = fantasmasArr.find(x => x.telefono === c.telefono);
+                    Object.assign(f, flujoInfo);
+                    flujoStats.enriquecidos++;
+                } else {
+                    // Agregar cliente que el detector excluyo
+                    fantasmasArr.push({
+                        telefono: c.telefono,
+                        cliente: c.cliente_nombre || '',
+                        saldo: parseFloat(c.saldo) || 0,
+                        diasAtraso: c.dias_atraso || 0,
+                        promotor: c.promotor || '',
+                        categoria: 'FRIO',  // default seguro
+                        porcentajeAvance: 0,
+                        ultimoContacto: { tipo: 'en_flujo', dias: null },
+                        ...flujoInfo
+                    });
+                    flujoStats.agregados++;
+                }
+            }
+            
+            resultado.fantasmas = fantasmasArr;
+            resultado.flujoMerge = {
+                totalEnFlujo: enFlujo.rows.length,
+                ...flujoStats
+            };
+            
+            console.log(`[Server] Merge flujo: ${flujoStats.enriquecidos} enriquecidos, ${flujoStats.agregados} agregados (${enFlujo.rows.length} total en flujo)`);
+        } catch (mergeErr) {
+            console.error('[Server] Error mergeando flujo (no critico):', mergeErr.message);
+            // Si el merge falla, devolvemos el resultado original sin merge
+        }
+        
         res.json({ success: true, ...resultado });
     } catch (error) {
         console.error('[Server] Error en /api/detectar:', error);
