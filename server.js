@@ -549,34 +549,74 @@ app.post('/api/sincronizar-zadarma', async (req, res) => {
             return `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
         };
         
+        // Parametros segun spec Zadarma /v1/statistics/pbx/
+        // SOLO start, end, version, skip - NO usar 'type' (es de otro endpoint)
         const params = {
             start: fmt(desde),
             end: fmt(ahora),
-            limit: 1000,
-            type: 'overall'
+            version: 2  // version 2 incluye disposition y duration
         };
         
-        // Firmar la peticion
+        // ═════ FIRMA SEGUN SPEC OFICIAL ZADARMA ═════
+        // 1. Sort params alfabeticamente, build "key=value&key=value" SIN encodear
+        // 2. md5(query_string)
+        // 3. HMAC-SHA1(method_path + query_string + md5_hex, SECRET)
+        // 4. Auth header = base64(KEY:hmac_hex)
+        // CRITICO: La firma usa los valores RAW (sin URL-encoding)
+        //          pero la URL final SI lleva los valores URL-encoded
         const crypto = require('crypto');
-        const sorted = Object.keys(params).sort().map(k => `${k}=${params[k]}`).join('&');
-        const md5 = crypto.createHash('md5').update(sorted).digest('hex');
+        const keys = Object.keys(params).sort();
+        const rawQuery = keys.map(k => `${k}=${params[k]}`).join('&');
+        const md5 = crypto.createHash('md5').update(rawQuery).digest('hex');
         const metodo = '/v1/statistics/pbx/';
-        const toSign = metodo + sorted + md5;
+        const toSign = metodo + rawQuery + md5;
         const hmac = crypto.createHmac('sha1', ZADARMA_SECRET).update(toSign).digest('hex');
         const auth = Buffer.from(`${ZADARMA_KEY}:${hmac}`).toString('base64');
         
-        const url = `https://api.zadarma.com${metodo}?${sorted}`;
+        // URL final SI requiere URL-encoding de los valores (espacios -> %20, etc.)
+        const encodedQuery = keys.map(k => `${k}=${encodeURIComponent(params[k])}`).join('&');
+        const url = `https://api.zadarma.com${metodo}?${encodedQuery}`;
+        
+        // ═════ LOGS DEBUG (visibles en Render Troncos) ═════
+        console.log(`🔄 [Zadarma Sync] Iniciando...`);
+        console.log(`   Periodo: ${params.start} -> ${params.end}`);
+        console.log(`   Key len: ${ZADARMA_KEY.length}, Secret len: ${ZADARMA_SECRET.length}`);
+        console.log(`   rawQuery: ${rawQuery}`);
+        console.log(`   md5: ${md5}`);
+        console.log(`   toSign: ${toSign}`);
+        console.log(`   hmac: ${hmac.substring(0, 8)}...${hmac.substring(hmac.length-4)}`);
+        console.log(`   URL: ${url}`);
+        
+        // Header tradicional: Authorization: <KEY>:<hmac_hex>
+        // (Zadarma acepta ambos formatos pero el oficial es este, no base64)
+        const authHeader = `${ZADARMA_KEY}:${hmac}`;
+        console.log(`   Auth header: ${authHeader.substring(0, 12)}...`);
+        
         const response = await fetch(url, {
             method: 'GET',
-            headers: { 'Authorization': auth }
+            headers: { 'Authorization': authHeader }
         });
-        const json = await response.json();
+        const responseText = await response.text();
+        console.log(`   HTTP status: ${response.status}`);
+        console.log(`   Response: ${responseText.substring(0, 500)}`);
+        
+        let json;
+        try {
+            json = JSON.parse(responseText);
+        } catch(e) {
+            return res.status(500).json({
+                success: false,
+                error: 'Respuesta no es JSON',
+                message: responseText.substring(0, 300)
+            });
+        }
         
         if (json.status !== 'success') {
             return res.status(500).json({
                 success: false,
                 error: 'Zadarma API error',
-                message: json.message || JSON.stringify(json)
+                message: json.message || JSON.stringify(json),
+                detalle: 'Revisa logs de Render para ver firma y respuesta'
             });
         }
         
