@@ -543,13 +543,19 @@ app.post('/api/sincronizar-zadarma', async (req, res) => {
         // ═════ PRE-TEST: validar credenciales con endpoint mas simple ═════
         // Si /v1/info/balance/ funciona pero /v1/statistics/pbx/ no, es problema del segundo
         // Si /v1/info/balance/ tambien falla, es problema de credenciales
+        // FORMATO OFICIAL ZADARMA (doc PHP):
+        //   sign = base64(hmac_sha1(metodo + paramsStr + md5(paramsStr), secret))
+        //   Authorization: KEY:sign
         const crypto = require('crypto');
         const testMd5 = crypto.createHash('md5').update('').digest('hex');
-        const testSign = '/v1/info/balance/' + testMd5;
-        const testHmac = crypto.createHmac('sha1', ZADARMA_SECRET).update(testSign).digest('hex');
-        const testAuth = `${ZADARMA_KEY}:${testHmac}`;
+        const testToSign = '/v1/info/balance/' + testMd5;
+        // hmac BINARY (sin .toString('hex')) -> luego base64
+        const testHmacBinary = crypto.createHmac('sha1', ZADARMA_SECRET).update(testToSign).digest();
+        const testSignBase64 = testHmacBinary.toString('base64');
+        const testAuth = `${ZADARMA_KEY}:${testSignBase64}`;
         
         console.log(`🧪 [Pre-test] Probando /v1/info/balance/...`);
+        console.log(`   Test auth: ${testAuth.substring(0, 30)}...`);
         const testResp = await fetch('https://api.zadarma.com/v1/info/balance/', {
             method: 'GET',
             headers: { 'Authorization': testAuth }
@@ -591,40 +597,45 @@ app.post('/api/sincronizar-zadarma', async (req, res) => {
         };
         
         // ═════ FIRMA SEGUN SPEC OFICIAL ZADARMA ═════
-        // 1. Sort params alfabeticamente, build "key=value&key=value" SIN encodear
-        // 2. md5(query_string)
-        // 3. HMAC-SHA1(method_path + query_string + md5_hex, SECRET)
-        // 4. Auth header = base64(KEY:hmac_hex)
-        // CRITICO: La firma usa los valores RAW (sin URL-encoding)
-        //          pero la URL final SI lleva los valores URL-encoded
+        // Doc oficial (PHP):
+        //   ksort($params);
+        //   $paramsStr = http_build_query($params);
+        //   $sign = base64_encode(hash_hmac('sha1', $method . $paramsStr . md5($paramsStr), $secret));
+        //   Authorization: KEY:sign
+        // 
+        // CRITICO:
+        //   - hash_hmac SIN 4to parametro = devuelve BINARY raw
+        //   - base64_encode del BINARY (NO del hex)
+        //   - http_build_query usa URL-encoding RFC1738 (espacios -> +, : -> %3A)
+        //   - md5() devuelve hex
         const keys = Object.keys(params).sort();
-        const rawQuery = keys.map(k => `${k}=${params[k]}`).join('&');
-        const md5 = crypto.createHash('md5').update(rawQuery).digest('hex');
+        // Equivalente a http_build_query de PHP (URL-encoded con RFC1738: espacios -> +)
+        const paramsStr = keys.map(k => 
+            `${encodeURIComponent(k).replace(/%20/g, '+')}=${encodeURIComponent(params[k]).replace(/%20/g, '+')}`
+        ).join('&');
+        const md5 = crypto.createHash('md5').update(paramsStr).digest('hex');
         const metodo = '/v1/statistics/pbx/';
-        const toSign = metodo + rawQuery + md5;
-        const hmac = crypto.createHmac('sha1', ZADARMA_SECRET).update(toSign).digest('hex');
-        const auth = Buffer.from(`${ZADARMA_KEY}:${hmac}`).toString('base64');
+        const toSign = metodo + paramsStr + md5;
+        // hmac BINARY (sin .digest('hex')) -> luego toString('base64')
+        const hmacBinary = crypto.createHmac('sha1', ZADARMA_SECRET).update(toSign).digest();
+        const sign = hmacBinary.toString('base64');
         
-        // URL final SI requiere URL-encoding de los valores (espacios -> %20, etc.)
-        const encodedQuery = keys.map(k => `${k}=${encodeURIComponent(params[k])}`).join('&');
-        const url = `https://api.zadarma.com${metodo}?${encodedQuery}`;
+        // URL final: mismos params URL-encoded (con + para espacios)
+        const url = `https://api.zadarma.com${metodo}?${paramsStr}`;
         
         // ═════ LOGS DEBUG (visibles en Render Troncos) ═════
         console.log(`🔄 [Zadarma Sync] Iniciando...`);
         console.log(`   Periodo: ${params.start} -> ${params.end}`);
         console.log(`   Key len: ${ZADARMA_KEY.length}, Secret len: ${ZADARMA_SECRET.length}`);
-        console.log(`   Key hex bytes: ${Buffer.from(ZADARMA_KEY).toString('hex').substring(0, 30)}...`);
-        console.log(`   Secret hex bytes: ${Buffer.from(ZADARMA_SECRET).toString('hex').substring(0, 30)}...`);
-        console.log(`   rawQuery: ${rawQuery}`);
+        console.log(`   paramsStr: ${paramsStr}`);
         console.log(`   md5: ${md5}`);
         console.log(`   toSign: ${toSign}`);
-        console.log(`   hmac: ${hmac.substring(0, 8)}...${hmac.substring(hmac.length-4)}`);
+        console.log(`   sign (base64): ${sign}`);
         console.log(`   URL: ${url}`);
         
-        // Header tradicional: Authorization: <KEY>:<hmac_hex>
-        // (Zadarma acepta ambos formatos pero el oficial es este, no base64)
-        const authHeader = `${ZADARMA_KEY}:${hmac}`;
-        console.log(`   Auth header: ${authHeader.substring(0, 12)}...`);
+        // Header oficial Zadarma: Authorization: KEY:base64(hmac_binary)
+        const authHeader = `${ZADARMA_KEY}:${sign}`;
+        console.log(`   Auth header: ${authHeader.substring(0, 30)}...`);
         
         const response = await fetch(url, {
             method: 'GET',
