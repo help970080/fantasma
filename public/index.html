@@ -211,7 +211,15 @@ input[type="checkbox"] { cursor: pointer; }
         <option value="sin_flujo">No está en flujo</option>
         <option value="hoy">Contactado hoy</option>
     </select>
+    <select id="filtro-llamada">
+        <option value="">📞 Todas llamadas</option>
+        <option value="contesto">✅ Solo contestaron</option>
+        <option value="nocontesto">❌ Solo no contestaron</option>
+        <option value="grabacion">🎧 Solo con grabación</option>
+        <option value="sin_llamada">📵 Sin llamada aún</option>
+    </select>
     <button class="btn" onclick="exportarExcel()" title="Exportar filtrados a Excel" style="background:#085041;color:white;">📥 Excel</button>
+    <button class="btn" onclick="sincronizarZadarma()" title="Sincronizar resultados de llamadas desde Zadarma" style="background:#6f42c1;color:white;">🔄 Zadarma</button>
 </div>
 
 <div class="selection-bar" id="selection-bar">
@@ -462,6 +470,7 @@ function aplicarFiltros() {
     const promotor = document.getElementById('filtro-promotor').value;
     const saldoMin = parseFloat(document.getElementById('filtro-saldo').value) || 0;
     const envioFiltro = document.getElementById('filtro-envio').value;
+    const llamadaFiltro = document.getElementById('filtro-llamada')?.value || '';
     const cats = cat ? cat.split(',') : null;
     
     filtered = allFantasmas.filter(f => {
@@ -472,10 +481,12 @@ function aplicarFiltros() {
             const haystack = (f.cliente + ' ' + f.telefono).toLowerCase();
             if (!haystack.includes(buscar)) return false;
         }
+        
+        const tel10 = f.telefono.slice(-10);
+        const miToque = toquesMap[tel10] || toquesMap[f.telefono] || null;
+        
         // Filtro de estado de envio
         if (envioFiltro) {
-            const tel10 = f.telefono.slice(-10);
-            const miToque = toquesMap[tel10] || toquesMap[f.telefono] || null;
             if (envioFiltro === 'sin_envio' && (miToque || f.en_flujo)) return false;
             if (envioFiltro === 'enviado' && (!miToque || miToque.respondio)) return false;
             if (envioFiltro === 'respondio' && (!miToque || !miToque.respondio)) return false;
@@ -488,6 +499,23 @@ function aplicarFiltros() {
                 if (!tieneToqueHoy) return false;
             }
         }
+        
+        // Filtro por estado de llamada Zadarma
+        if (llamadaFiltro) {
+            if (llamadaFiltro === 'contesto') {
+                if (!miToque?.llamadaExitosa) return false;
+            }
+            if (llamadaFiltro === 'nocontesto') {
+                if (!miToque?.llamadaResultado || miToque.llamadaExitosa) return false;
+            }
+            if (llamadaFiltro === 'grabacion') {
+                if (!miToque?.grabacionUrl) return false;
+            }
+            if (llamadaFiltro === 'sin_llamada') {
+                if (miToque?.llamadaResultado) return false;
+            }
+        }
+        
         return true;
     });
     renderTabla();
@@ -518,16 +546,51 @@ function renderTabla(reset = true) {
         const tel10 = f.telefono.slice(-10);
         const miToque = toquesMap[tel10] || toquesMap[f.telefono] || null;
         let toqueInfo = '';
-        if (miToque && miToque.respondio) {
-            const resp = (miToque.respuesta || '').replace(/^\[.*?\]:\s*/, '').substring(0, 30);
-            toqueInfo = `<span style="color:#0F6E56;cursor:pointer;" title="${escapeHtml(miToque.respuesta || '')}" onclick="alert('Respuesta de ${escapeHtml(f.cliente)}:\\n\\n${escapeHtml(miToque.respuesta || '')}')">💬 ${escapeHtml(resp)}${resp.length >= 30 ? '...' : ''}</span>`;
-        } else if (miToque && miToque.fecha) {
-            const dias = Math.floor((Date.now() - new Date(miToque.fecha).getTime()) / 86400000);
-            const canalIcon = miToque.canal === 'llamada_ivr' ? '📞' : miToque.canal === 'whatsapp_auto' ? '🚀' : '📱';
-            toqueInfo = `<span style="color:#854F0B;" title="${new Date(miToque.fecha).toLocaleDateString('es-MX')}">${canalIcon} hace ${dias}d</span>`;
-        } else {
-            toqueInfo = '<span style="color:#A32D2D;">sin envío</span>';
+        
+        // Acumular bloques (puede mostrar resultado de llamada + respuesta WhatsApp)
+        const bloques = [];
+        
+        // ─── Bloque 1: Resultado de llamada (si existe) ───
+        if (miToque && miToque.llamadaResultado) {
+            const fechaLlamada = miToque.llamadaFecha ? new Date(miToque.llamadaFecha) : null;
+            let hace = '';
+            if (fechaLlamada) {
+                const minutos = Math.floor((Date.now() - fechaLlamada.getTime()) / 60000);
+                if (minutos < 60) hace = `hace ${minutos}min`;
+                else if (minutos < 1440) hace = `hace ${Math.floor(minutos/60)}h`;
+                else hace = `hace ${Math.floor(minutos/1440)}d`;
+            }
+            const color = miToque.llamadaExitosa ? '#0F6E56' : '#A85F0B';
+            let html = `<div style="color:${color};font-weight:500;">📞 ${escapeHtml(miToque.llamadaResultado)}`;
+            if (hace) html += ` <small style="color:#666;">(${hace})</small>`;
+            html += '</div>';
+            
+            // Botón de grabación si hay link
+            if (miToque.grabacionUrl) {
+                html += `<button onclick="abrirGrabacion('${miToque.grabacionUrl.replace(/'/g, "\\'")}', '${tel10}', '${escapeHtml(f.cliente).replace(/'/g, "\\'")}')" style="margin-top:3px;background:#E7F1FB;border:1px solid #B8DAFF;color:#0B5ED7;padding:2px 8px;border-radius:10px;cursor:pointer;font-size:11px;">🎧 Escuchar</button>`;
+            }
+            bloques.push(html);
         }
+        
+        // ─── Bloque 2: Respuesta WhatsApp (si existe) ───
+        if (miToque && miToque.respondio && miToque.respuesta) {
+            const resp = (miToque.respuesta || '').replace(/^\[.*?\]:\s*/, '').substring(0, 30);
+            const respFull = (miToque.respuesta || '').replace(/'/g, "\\'");
+            bloques.push(`<span style="color:#0F6E56;cursor:pointer;" title="${escapeHtml(miToque.respuesta || '')}" onclick="alert('Respuesta de ${escapeHtml(f.cliente).replace(/'/g, "\\'")}:\\n\\n${escapeHtml(miToque.respuesta || '').replace(/'/g, "\\'")}')">💬 ${escapeHtml(resp)}${resp.length >= 30 ? '...' : ''}</span>`);
+        }
+        
+        // ─── Bloque 3: Si no hay nada de lo anterior, mostrar envío genérico ───
+        if (bloques.length === 0) {
+            if (miToque && miToque.fecha) {
+                const dias = Math.floor((Date.now() - new Date(miToque.fecha).getTime()) / 86400000);
+                const canalIcon = miToque.canal === 'llamada_ivr' ? '📞' : miToque.canal === 'whatsapp_auto' ? '🚀' : '📱';
+                bloques.push(`<span style="color:#854F0B;" title="${new Date(miToque.fecha).toLocaleDateString('es-MX')}">${canalIcon} hace ${dias}d</span>`);
+            } else {
+                bloques.push('<span style="color:#A32D2D;">sin envío</span>');
+            }
+        }
+        
+        toqueInfo = bloques.join('');
         
         // Badge de flujo automatico (cliente perseguido por AutoRunner)
         let flujoBadge = '';
@@ -1028,21 +1091,36 @@ function exportarExcel() {
     }
     
     // Crear CSV con los datos filtrados
-    const headers = ['Categoria','Cliente','Telefono','Saldo','% Pago','Dias Atraso','Promotor','Estado Envio','Respuesta'];
+    const headers = ['Categoria','Cliente','Telefono','Saldo','% Pago','Dias Atraso','Promotor','Estado Envio','Respuesta','Resultado Llamada','Fecha Llamada','Tiene Grabacion','URL Grabacion'];
     
     const rows = filtered.map(f => {
         const tel10 = f.telefono.slice(-10);
         const miToque = toquesMap[tel10] || toquesMap[f.telefono] || null;
         let estadoEnvio = 'Sin envío';
         let respuesta = '';
+        let resultadoLlamada = '';
+        let fechaLlamada = '';
+        let tieneGrabacion = 'NO';
+        let urlGrabacion = '';
         
-        if (miToque && miToque.respondio) {
-            estadoEnvio = 'Respondió';
-            respuesta = (miToque.respuesta || '').replace(/"/g, "'");
-        } else if (miToque && miToque.fecha) {
-            const dias = Math.floor((Date.now() - new Date(miToque.fecha).getTime()) / 86400000);
-            const canal = miToque.canal === 'llamada_ivr' ? 'IVR' : 'WhatsApp';
-            estadoEnvio = `Enviado ${canal} hace ${dias}d`;
+        if (miToque) {
+            if (miToque.respondio) {
+                estadoEnvio = 'Respondió';
+                respuesta = (miToque.respuesta || '').replace(/"/g, "'");
+            } else if (miToque.fecha) {
+                const dias = Math.floor((Date.now() - new Date(miToque.fecha).getTime()) / 86400000);
+                const canal = miToque.canal === 'llamada_ivr' ? 'IVR' : 'WhatsApp';
+                estadoEnvio = `Enviado ${canal} hace ${dias}d`;
+            }
+            
+            if (miToque.llamadaResultado) {
+                resultadoLlamada = miToque.llamadaResultado.replace(/"/g, "'");
+                fechaLlamada = miToque.llamadaFecha ? new Date(miToque.llamadaFecha).toLocaleString('es-MX') : '';
+            }
+            if (miToque.grabacionUrl) {
+                tieneGrabacion = 'SI';
+                urlGrabacion = miToque.grabacionUrl;
+            }
         }
         
         return [
@@ -1054,7 +1132,11 @@ function exportarExcel() {
             f.diasAtraso,
             `"${(f.promotor || '').replace(/"/g, "'")}"`,
             estadoEnvio,
-            `"${respuesta}"`
+            `"${respuesta}"`,
+            `"${resultadoLlamada}"`,
+            `"${fechaLlamada}"`,
+            tieneGrabacion,
+            `"${urlGrabacion}"`
         ].join(',');
     });
     
@@ -1215,15 +1297,117 @@ async function exportarFlujo() {
 }
 
 let timer;
-['filtro-buscar', 'filtro-categoria', 'filtro-promotor', 'filtro-saldo', 'filtro-envio'].forEach(id => {
-    document.getElementById(id).addEventListener('input', () => {
-        clearTimeout(timer);
-        timer = setTimeout(aplicarFiltros, 200);
-    });
+['filtro-buscar', 'filtro-categoria', 'filtro-promotor', 'filtro-saldo', 'filtro-envio', 'filtro-llamada'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) {
+        el.addEventListener('input', () => {
+            clearTimeout(timer);
+            timer = setTimeout(aplicarFiltros, 200);
+        });
+    }
 });
 
 cargarConfig();
 cargarDatos();
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GRABACIONES + SINCRONIZACION ZADARMA
+// ═══════════════════════════════════════════════════════════════════════════
+
+function abrirGrabacion(url, telefono, cliente) {
+    let modal = document.getElementById('modal-grabacion');
+    if (!modal) {
+        // Crear modal una sola vez
+        modal = document.createElement('div');
+        modal.id = 'modal-grabacion';
+        modal.className = 'modal-overlay';
+        modal.style.cssText = 'display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:9999;align-items:center;justify-content:center;';
+        modal.onclick = function(e) { if (e.target === this) cerrarGrabacion(); };
+        modal.innerHTML = `
+            <div style="background:white;padding:24px;border-radius:8px;max-width:520px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.3);">
+                <h3 style="margin:0 0 12px;font-weight:500;color:#222;">🎧 Grabación de llamada</h3>
+                <div id="modal-grab-info" style="color:#666;margin-bottom:14px;font-size:13px;"></div>
+                <audio id="modal-grab-audio" controls style="width:100%;outline:none;"></audio>
+                <div style="margin-top:16px;display:flex;justify-content:space-between;align-items:center;">
+                    <a id="modal-grab-descarga" download target="_blank" style="color:#0B5ED7;text-decoration:none;font-size:13px;">⬇️ Descargar MP3</a>
+                    <button onclick="cerrarGrabacion()" style="background:#333;color:white;border:0;padding:8px 18px;border-radius:6px;cursor:pointer;">Cerrar</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+    }
+    
+    document.getElementById('modal-grab-info').innerHTML = `📱 <strong>${telefono}</strong> — ${cliente || 'Cliente'}`;
+    const audio = document.getElementById('modal-grab-audio');
+    audio.src = url;
+    audio.load();
+    document.getElementById('modal-grab-descarga').href = url;
+    document.getElementById('modal-grab-descarga').download = `llamada_${telefono}_${Date.now()}.mp3`;
+    modal.style.display = 'flex';
+}
+
+function cerrarGrabacion() {
+    const modal = document.getElementById('modal-grabacion');
+    if (!modal) return;
+    const audio = document.getElementById('modal-grab-audio');
+    if (audio) { audio.pause(); audio.src = ''; }
+    modal.style.display = 'none';
+}
+
+async function sincronizarZadarma() {
+    const horasStr = prompt(
+        '¿Cuántas horas hacia atrás sincronizar desde Zadarma?\n\n' +
+        '24  = último día\n' +
+        '72  = últimos 3 días\n' +
+        '168 = última semana\n' +
+        '720 = último mes (máximo)',
+        '24'
+    );
+    if (!horasStr) return;
+    const horas = parseInt(horasStr);
+    if (!horas || horas < 1 || horas > 720) {
+        showToast('Valor inválido (debe ser 1-720)', 'error');
+        return;
+    }
+    
+    showToast(`⏳ Sincronizando últimas ${horas}h de Zadarma...`, 'success');
+    
+    try {
+        const r = await fetch('/api/sincronizar-zadarma', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ horas })
+        });
+        const data = await r.json();
+        
+        if (data.success) {
+            alert(
+                '✅ Sincronización completada\n\n' +
+                `Total llamadas en Zadarma: ${data.total}\n` +
+                `Nuevas registradas: ${data.insertados}\n` +
+                `Ya existían: ${data.ya_existian}\n` +
+                `Período: últimas ${data.periodo_horas}h\n\n` +
+                'Recargando panel...'
+            );
+            // Recargar mapa de toques sin recargar toda la página
+            try {
+                const tRes = await fetch('/api/toques/mapa');
+                const tData = await tRes.json();
+                if (tData.success) {
+                    toquesMap = tData.mapa || {};
+                    renderTabla();
+                    showToast(`✓ ${data.insertados} llamadas nuevas integradas`, 'success');
+                }
+            } catch(e) {
+                location.reload();
+            }
+        } else {
+            alert(`❌ Error: ${data.error}\n${data.message || ''}\n\nVerifica que ZADARMA_KEY y ZADARMA_SECRET estén configurados en Render.`);
+        }
+    } catch(e) {
+        alert('❌ Error de red: ' + e.message);
+    }
+}
 </script>
 
 </body>
