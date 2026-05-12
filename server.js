@@ -395,10 +395,299 @@ app.post('/api/respuesta-cliente', async (req, res) => {
 });
 
 // ───────────────────────────────────────────────────────────────────────────
+// API: Resultado de llamada (recibido desde el bridge IVR / Zadarma webhook)
+// ───────────────────────────────────────────────────────────────────────────
+
+app.post('/api/resultado-llamada', async (req, res) => {
+    try {
+        // Validar Bearer token (mismo que IVR_ZADARMA_TOKEN)
+        const auth = req.headers.authorization || '';
+        const token = auth.replace(/^Bearer\s+/i, '').trim();
+        const expected = process.env.IVR_ZADARMA_TOKEN || '';
+        if (expected && token !== expected) {
+            return res.status(401).json({ success: false, error: 'Token invalido' });
+        }
+        
+        const {
+            telefono, disposition, duration, statusCode,
+            pbxCallId, event, entrante, grabacionUrl, fecha
+        } = req.body;
+        
+        if (!telefono) {
+            return res.status(400).json({ success: false, error: 'telefono requerido' });
+        }
+        
+        const tel10 = String(telefono).replace(/\D/g, '').slice(-10);
+        
+        // ─── Caso 1: NOTIFY_RECORD (solo link de grabacion) ───
+        // Buscamos la fila reciente de esta llamada por pbxCallId y le añadimos el link
+        if (event === 'NOTIFY_RECORD' && grabacionUrl) {
+            // Buscar log mas reciente de esta llamada (ultima hora) y agregar grabacion
+            const updated = await pool.query(`
+                UPDATE seguimiento_log
+                SET mensaje = COALESCE(mensaje, '') || ' | 🎙️ ' || $2
+                WHERE telefono = $1
+                  AND tipo = 'llamada_resultado'
+                  AND creado_en > NOW() - INTERVAL '2 hours'
+                  AND (mensaje IS NULL OR mensaje NOT LIKE '%🎙️%')
+                  AND id = (
+                      SELECT id FROM seguimiento_log
+                      WHERE telefono = $1 AND tipo = 'llamada_resultado'
+                        AND creado_en > NOW() - INTERVAL '2 hours'
+                      ORDER BY creado_en DESC LIMIT 1
+                  )
+                RETURNING id
+            `, [tel10, grabacionUrl]);
+            
+            // Si no encontramos llamada previa, insertamos registro nuevo
+            if (updated.rowCount === 0) {
+                await pool.query(`
+                    INSERT INTO seguimiento_log
+                        (telefono, tipo, canal, mensaje, exitoso, disparado_por)
+                    VALUES ($1, 'llamada_resultado', 'llamada_ivr', $2, true, 'zadarma_webhook')
+                `, [tel10, `🎙️ ${grabacionUrl}`]);
+            }
+            
+            console.log(`🎙️ Grabacion guardada para ${tel10}`);
+            return res.json({ success: true, grabacion: true });
+        }
+        
+        // ─── Caso 2: NOTIFY_OUT_END / NOTIFY_END (resultado de la llamada) ───
+        const dur = parseInt(duration) || 0;
+        const disp = (disposition || 'unknown').toLowerCase();
+        
+        // Determinar resultado legible (lo que se muestra al usuario)
+        let resultado = 'desconocido';
+        let exitoso = false;
+        if (disp === 'answered' && dur >= 5) {
+            resultado = `✅ Contestó (${dur}s)`;
+            exitoso = true;
+        } else if (disp === 'answered' && dur < 5) {
+            resultado = `⚠️ Colgó rápido (${dur}s)`;
+            exitoso = false;
+        } else if (disp === 'busy') {
+            resultado = '⏰ Ocupado';
+            exitoso = false;
+        } else if (disp === 'no-answer' || disp === 'noanswer') {
+            resultado = '❌ Sin respuesta';
+            exitoso = false;
+        } else if (disp === 'cancel' || disp === 'cancelled') {
+            resultado = '🚫 Cancelada';
+            exitoso = false;
+        } else if (disp === 'failed') {
+            resultado = '⚠️ Falló (número inválido)';
+            exitoso = false;
+        } else {
+            resultado = `${disp} (${dur}s)`;
+            exitoso = dur > 5;
+        }
+        
+        // Buscar seguimiento_id activo
+        const flujo = await pool.query(`
+            SELECT id FROM seguimiento_clientes
+            WHERE telefono = $1 AND estado IN ('pendiente', 'en_curso')
+            LIMIT 1
+        `, [tel10]);
+        const seguimientoId = flujo.rows[0]?.id || null;
+        
+        // Insertar log de resultado
+        await pool.query(`
+            INSERT INTO seguimiento_log
+                (seguimiento_id, telefono, tipo, canal, mensaje, exitoso, disparado_por)
+            VALUES ($1, $2, 'llamada_resultado', 'llamada_ivr', $3, $4, 'zadarma_webhook')
+        `, [seguimientoId, tel10, `${resultado} | disp=${disp} dur=${dur}s pbx=${pbxCallId || 'n/a'}`, exitoso]);
+        
+        // Si contestó, marcar como "respondió" en seguimiento_clientes
+        if (exitoso && seguimientoId) {
+            try {
+                await pool.query(`
+                    UPDATE seguimiento_clientes
+                    SET estado = 'respondido',
+                        respondio_en = NOW()
+                    WHERE id = $1 AND estado IN ('pendiente', 'en_curso')
+                `, [seguimientoId]);
+                console.log(`✅ Cliente ${tel10} marcado como respondió (llamada contestada)`);
+            } catch(e) {
+                // Si la columna respondio_en no existe, solo cambiamos estado
+                await pool.query(`UPDATE seguimiento_clientes SET estado = 'respondido' WHERE id = $1`, [seguimientoId]);
+            }
+        }
+        
+        console.log(`📞 Resultado llamada ${tel10}: ${resultado}`);
+        res.json({ success: true, resultado, exitoso });
+        
+    } catch (error) {
+        console.error('[Server] Error en /api/resultado-llamada:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// API: Sincronizar Zadarma (pull de estadisticas via API)
+// Util para recuperar llamadas hechas antes de configurar el webhook
+// ───────────────────────────────────────────────────────────────────────────
+
+app.post('/api/sincronizar-zadarma', async (req, res) => {
+    try {
+        const ZADARMA_KEY = process.env.ZADARMA_KEY || '';
+        const ZADARMA_SECRET = process.env.ZADARMA_SECRET || '';
+        
+        if (!ZADARMA_KEY || !ZADARMA_SECRET) {
+            return res.status(400).json({
+                success: false,
+                error: 'ZADARMA_KEY y ZADARMA_SECRET no configurados en env vars'
+            });
+        }
+        
+        // Periodo a sincronizar (default: ultimas 24h)
+        const horas = parseInt(req.body?.horas) || 24;
+        const ahora = new Date();
+        const desde = new Date(ahora.getTime() - horas * 60 * 60 * 1000);
+        
+        const fmt = (d) => {
+            const pad = n => String(n).padStart(2, '0');
+            return `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
+        };
+        
+        const params = {
+            start: fmt(desde),
+            end: fmt(ahora),
+            limit: 1000,
+            type: 'overall'
+        };
+        
+        // Firmar la peticion
+        const crypto = require('crypto');
+        const sorted = Object.keys(params).sort().map(k => `${k}=${params[k]}`).join('&');
+        const md5 = crypto.createHash('md5').update(sorted).digest('hex');
+        const metodo = '/v1/statistics/pbx/';
+        const toSign = metodo + sorted + md5;
+        const hmac = crypto.createHmac('sha1', ZADARMA_SECRET).update(toSign).digest('hex');
+        const auth = Buffer.from(`${ZADARMA_KEY}:${hmac}`).toString('base64');
+        
+        const url = `https://api.zadarma.com${metodo}?${sorted}`;
+        const response = await fetch(url, {
+            method: 'GET',
+            headers: { 'Authorization': auth }
+        });
+        const json = await response.json();
+        
+        if (json.status !== 'success') {
+            return res.status(500).json({
+                success: false,
+                error: 'Zadarma API error',
+                message: json.message || JSON.stringify(json)
+            });
+        }
+        
+        const stats = json.stats || [];
+        let insertados = 0;
+        let actualizados = 0;
+        
+        for (const call of stats) {
+            // Filtrar solo salientes (out) y entrantes con duracion
+            const tipoLlamada = call.calltype || '';
+            if (tipoLlamada !== 'outgoing' && tipoLlamada !== 'incoming') continue;
+            
+            const dest = String(call.to || call.destination || '').replace(/\D/g, '').slice(-10);
+            if (!dest || dest.length !== 10) continue;
+            
+            const dur = parseInt(call.billseconds || call.seconds || 0);
+            const disp = (call.disposition || 'unknown').toLowerCase();
+            
+            let resultado = disp;
+            let exitoso = false;
+            if (disp === 'answered' && dur >= 5) {
+                resultado = `✅ Contestó (${dur}s)`;
+                exitoso = true;
+            } else if (disp === 'busy') resultado = '⏰ Ocupado';
+            else if (disp === 'no-answer' || disp === 'noanswer') resultado = '❌ Sin respuesta';
+            else if (disp === 'cancel') resultado = '🚫 Cancelada';
+            else if (disp === 'failed') resultado = '⚠️ Falló';
+            
+            // Verificar si ya existe para no duplicar (usar callstart como llave secundaria)
+            const existe = await pool.query(`
+                SELECT id FROM seguimiento_log
+                WHERE telefono = $1 AND tipo = 'llamada_resultado'
+                  AND mensaje LIKE '%' || $2 || '%'
+                LIMIT 1
+            `, [dest, call.callstart || '']);
+            
+            if (existe.rows.length === 0) {
+                await pool.query(`
+                    INSERT INTO seguimiento_log
+                        (telefono, tipo, canal, mensaje, exitoso, disparado_por, creado_en)
+                    VALUES ($1, 'llamada_resultado', 'llamada_ivr', $2, $3, 'zadarma_sync', $4)
+                `, [
+                    dest,
+                    `${resultado} | sync ${call.callstart} | disp=${disp} dur=${dur}s`,
+                    exitoso,
+                    call.callstart || new Date()
+                ]);
+                insertados++;
+            } else {
+                actualizados++;
+            }
+        }
+        
+        console.log(`🔄 Sincronizacion Zadarma: ${insertados} nuevas, ${actualizados} ya existian, total recibidas ${stats.length}`);
+        
+        res.json({
+            success: true,
+            total: stats.length,
+            insertados,
+            ya_existian: actualizados,
+            periodo_horas: horas
+        });
+        
+    } catch (error) {
+        console.error('[Server] Error en /api/sincronizar-zadarma:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// API: Llamadas de un telefono especifico (con grabaciones)
+// ───────────────────────────────────────────────────────────────────────────
+
+app.get('/api/llamadas/:telefono', async (req, res) => {
+    try {
+        const tel10 = String(req.params.telefono).replace(/\D/g, '').slice(-10);
+        
+        const result = await pool.query(`
+            SELECT id, mensaje, exitoso, disparado_por, creado_en
+            FROM seguimiento_log
+            WHERE telefono = $1 AND tipo = 'llamada_resultado'
+            ORDER BY creado_en DESC
+            LIMIT 50
+        `, [tel10]);
+        
+        // Extraer link de grabacion si existe (formato: "🎙️ https://...")
+        const llamadas = result.rows.map(row => {
+            const msg = row.mensaje || '';
+            const matchGrab = msg.match(/🎙️\s*(https:\/\/\S+)/);
+            return {
+                id: row.id,
+                resultado: msg.split('|')[0].trim(),
+                grabacionUrl: matchGrab ? matchGrab[1] : null,
+                detalle: msg,
+                exitoso: row.exitoso,
+                fuente: row.disparado_por,
+                fecha: row.creado_en
+            };
+        });
+        
+        res.json({ success: true, telefono: tel10, total: llamadas.length, llamadas });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// ───────────────────────────────────────────────────────────────────────────
 // API: Logs de un cliente especifico
 // ───────────────────────────────────────────────────────────────────────────
 
-// GET /api/toques/mapa - Devuelve ultimo toque + respuesta de cada telefono
+// GET /api/toques/mapa - Devuelve ultimo toque + respuesta + resultado llamada
 app.get('/api/toques/mapa', async (req, res) => {
     try {
         // Ultimo envio exitoso por telefono
@@ -410,12 +699,21 @@ app.get('/api/toques/mapa', async (req, res) => {
             ORDER BY telefono, creado_en DESC
         `);
         
-        // Ultima respuesta recibida por telefono
+        // Ultima respuesta recibida por telefono (WhatsApp)
         const respuestas = await pool.query(`
             SELECT DISTINCT ON (telefono)
                 telefono, mensaje, creado_en
             FROM seguimiento_log
             WHERE tipo = 'respuesta_recibida'
+            ORDER BY telefono, creado_en DESC
+        `);
+        
+        // Ultimo resultado de llamada por telefono
+        const llamadas = await pool.query(`
+            SELECT DISTINCT ON (telefono)
+                telefono, mensaje, exitoso, creado_en
+            FROM seguimiento_log
+            WHERE tipo = 'llamada_resultado'
             ORDER BY telefono, creado_en DESC
         `);
         
@@ -428,12 +726,16 @@ app.get('/api/toques/mapa', async (req, res) => {
                 fecha: row.creado_en,
                 exitoso: row.exitoso,
                 respondio: false,
-                respuesta: null
+                respuesta: null,
+                llamadaResultado: null,
+                llamadaExitosa: null,
+                llamadaFecha: null,
+                grabacionUrl: null
             };
             mapa[row.telefono] = mapa[tel10];
         });
         
-        // Agregar respuestas al mapa
+        // Agregar respuestas WhatsApp
         respuestas.rows.forEach(row => {
             const tel10 = row.telefono.slice(-10);
             if (mapa[tel10]) {
@@ -441,15 +743,51 @@ app.get('/api/toques/mapa', async (req, res) => {
                 mapa[tel10].respuesta = (row.mensaje || '').substring(0, 100);
                 mapa[tel10].fechaRespuesta = row.creado_en;
             } else {
-                // Respuesta sin envio previo (raro pero posible)
                 mapa[tel10] = {
                     canal: 'whatsapp_auto',
                     fecha: null,
                     respondio: true,
                     respuesta: (row.mensaje || '').substring(0, 100),
-                    fechaRespuesta: row.creado_en
+                    fechaRespuesta: row.creado_en,
+                    llamadaResultado: null,
+                    llamadaExitosa: null,
+                    grabacionUrl: null
                 };
                 mapa[row.telefono] = mapa[tel10];
+            }
+        });
+        
+        // Agregar resultado de llamadas (con grabacion)
+        llamadas.rows.forEach(row => {
+            const tel10 = row.telefono.slice(-10);
+            const msg = row.mensaje || '';
+            const resultado = msg.split('|')[0].trim();
+            const matchGrab = msg.match(/🎙️\s*(https:\/\/\S+)/);
+            const grabacionUrl = matchGrab ? matchGrab[1] : null;
+            
+            if (!mapa[tel10]) {
+                mapa[tel10] = {
+                    canal: 'llamada_ivr',
+                    fecha: row.creado_en,
+                    respondio: false,
+                    respuesta: null,
+                    llamadaResultado: resultado,
+                    llamadaExitosa: row.exitoso,
+                    llamadaFecha: row.creado_en,
+                    grabacionUrl
+                };
+                mapa[row.telefono] = mapa[tel10];
+            } else {
+                mapa[tel10].llamadaResultado = resultado;
+                mapa[tel10].llamadaExitosa = row.exitoso;
+                mapa[tel10].llamadaFecha = row.creado_en;
+                mapa[tel10].grabacionUrl = grabacionUrl;
+                // Si la llamada fue exitosa, contarla como "respondio"
+                if (row.exitoso && !mapa[tel10].respondio) {
+                    mapa[tel10].respondio = true;
+                    mapa[tel10].respuesta = resultado;
+                    mapa[tel10].fechaRespuesta = row.creado_en;
+                }
             }
         });
         
@@ -714,5 +1052,12 @@ app.listen(PORT, () => {
     console.log(`  GET  /api/auto-runner/estado    - 🤖 Estado del AutoRunner`);
     console.log(`  POST /api/auto-runner/toggle    - 🤖 Activar/pausar AutoRunner`);
     console.log(`  POST /api/auto-runner/ejecutar-ahora - 🤖 Forzar ciclo`);
+    console.log(`  POST /api/resultado-llamada     - 📞 Webhook Zadarma (desde bridge)`);
+    console.log(`  POST /api/sincronizar-zadarma   - 🔄 Pull manual estadisticas`);
+    console.log(`  GET  /api/llamadas/:telefono    - 📞 Historial llamadas + grabaciones`);
+    console.log(`Variables Zadarma (opcionales):`);
+    console.log(`  ZADARMA_KEY:         ${process.env.ZADARMA_KEY ? 'OK' : 'FALTA (sin grabaciones/sync)'}`);
+    console.log(`  ZADARMA_SECRET:      ${process.env.ZADARMA_SECRET ? 'OK' : 'FALTA'}`);
+    console.log(`  IVR_ZADARMA_TOKEN:   ${process.env.IVR_ZADARMA_TOKEN ? 'OK' : 'FALTA (auth webhook)'}`);
     console.log('═══════════════════════════════════════════════════════');
 });
