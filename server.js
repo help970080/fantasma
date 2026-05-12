@@ -529,8 +529,9 @@ app.post('/api/resultado-llamada', async (req, res) => {
 
 app.post('/api/sincronizar-zadarma', async (req, res) => {
     try {
-        const ZADARMA_KEY = process.env.ZADARMA_KEY || '';
-        const ZADARMA_SECRET = process.env.ZADARMA_SECRET || '';
+        // .trim() critico: elimina espacios/saltos invisibles que rompen la firma HMAC
+        const ZADARMA_KEY = (process.env.ZADARMA_KEY || '').trim();
+        const ZADARMA_SECRET = (process.env.ZADARMA_SECRET || '').trim();
         
         if (!ZADARMA_KEY || !ZADARMA_SECRET) {
             return res.status(400).json({
@@ -539,7 +540,39 @@ app.post('/api/sincronizar-zadarma', async (req, res) => {
             });
         }
         
-        // Periodo a sincronizar (default: ultimas 24h)
+        // ═════ PRE-TEST: validar credenciales con endpoint mas simple ═════
+        // Si /v1/info/balance/ funciona pero /v1/statistics/pbx/ no, es problema del segundo
+        // Si /v1/info/balance/ tambien falla, es problema de credenciales
+        const crypto = require('crypto');
+        const testMd5 = crypto.createHash('md5').update('').digest('hex');
+        const testSign = '/v1/info/balance/' + testMd5;
+        const testHmac = crypto.createHmac('sha1', ZADARMA_SECRET).update(testSign).digest('hex');
+        const testAuth = `${ZADARMA_KEY}:${testHmac}`;
+        
+        console.log(`🧪 [Pre-test] Probando /v1/info/balance/...`);
+        const testResp = await fetch('https://api.zadarma.com/v1/info/balance/', {
+            method: 'GET',
+            headers: { 'Authorization': testAuth }
+        });
+        const testText = await testResp.text();
+        console.log(`   Balance HTTP ${testResp.status}: ${testText.substring(0, 200)}`);
+        
+        if (testResp.status === 401) {
+            return res.status(500).json({
+                success: false,
+                error: 'Credenciales Zadarma invalidas',
+                message: `El endpoint /v1/info/balance/ tambien rechaza las claves. ` +
+                         `Esto indica copy/paste con error, o cuenta sin API REST habilitada. ` +
+                         `Detalle: ${testText.substring(0, 200)}`
+            });
+        }
+        
+        // Si balance OK, continuamos con stats
+        if (testResp.status !== 200) {
+            console.log(`⚠️ Balance dio HTTP ${testResp.status}, pero seguimos probando stats...`);
+        }
+        
+        // ═════ Periodo a sincronizar (default: ultimas 24h) ═════
         const horas = parseInt(req.body?.horas) || 24;
         const ahora = new Date();
         const desde = new Date(ahora.getTime() - horas * 60 * 60 * 1000);
@@ -564,7 +597,6 @@ app.post('/api/sincronizar-zadarma', async (req, res) => {
         // 4. Auth header = base64(KEY:hmac_hex)
         // CRITICO: La firma usa los valores RAW (sin URL-encoding)
         //          pero la URL final SI lleva los valores URL-encoded
-        const crypto = require('crypto');
         const keys = Object.keys(params).sort();
         const rawQuery = keys.map(k => `${k}=${params[k]}`).join('&');
         const md5 = crypto.createHash('md5').update(rawQuery).digest('hex');
@@ -581,6 +613,8 @@ app.post('/api/sincronizar-zadarma', async (req, res) => {
         console.log(`🔄 [Zadarma Sync] Iniciando...`);
         console.log(`   Periodo: ${params.start} -> ${params.end}`);
         console.log(`   Key len: ${ZADARMA_KEY.length}, Secret len: ${ZADARMA_SECRET.length}`);
+        console.log(`   Key hex bytes: ${Buffer.from(ZADARMA_KEY).toString('hex').substring(0, 30)}...`);
+        console.log(`   Secret hex bytes: ${Buffer.from(ZADARMA_SECRET).toString('hex').substring(0, 30)}...`);
         console.log(`   rawQuery: ${rawQuery}`);
         console.log(`   md5: ${md5}`);
         console.log(`   toSign: ${toSign}`);
