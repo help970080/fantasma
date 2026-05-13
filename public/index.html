@@ -218,6 +218,14 @@ input[type="checkbox"] { cursor: pointer; }
         <option value="grabacion">🎧 Solo con grabación</option>
         <option value="sin_llamada">📵 Sin llamada aún</option>
     </select>
+    <select id="filtro-convenio">
+        <option value="">📝 Todos convenios</option>
+        <option value="con_convenio">📝 Solo con convenio</option>
+        <option value="sin_convenio">Sin convenio</option>
+        <option value="paga_hoy">🔔 Pagan HOY</option>
+        <option value="vencido">⚠️ Convenio vencido</option>
+        <option value="proxima_semana">⏰ Pagan esta semana</option>
+    </select>
     <button class="btn" onclick="exportarExcel()" title="Exportar filtrados a Excel" style="background:#085041;color:white;">📥 Excel</button>
     <button class="btn" onclick="sincronizarZadarma()" title="Sincronizar resultados de llamadas desde Zadarma" style="background:#6f42c1;color:white;">🔄 Zadarma</button>
 </div>
@@ -323,6 +331,7 @@ input[type="checkbox"] { cursor: pointer; }
                     <th class="text-right">% pag</th>
                     <th class="text-right">Atraso</th>
                     <th>Promotor</th>
+                    <th>Convenio</th>
                     <th>Mi envío</th>
                     <th>Acciones</th>
                 </tr>
@@ -471,6 +480,7 @@ function aplicarFiltros() {
     const saldoMin = parseFloat(document.getElementById('filtro-saldo').value) || 0;
     const envioFiltro = document.getElementById('filtro-envio').value;
     const llamadaFiltro = document.getElementById('filtro-llamada')?.value || '';
+    const convenioFiltro = document.getElementById('filtro-convenio')?.value || '';
     const cats = cat ? cat.split(',') : null;
     
     filtered = allFantasmas.filter(f => {
@@ -513,6 +523,24 @@ function aplicarFiltros() {
             }
             if (llamadaFiltro === 'sin_llamada') {
                 if (miToque?.llamadaResultado) return false;
+            }
+        }
+        
+        // Filtro por convenios
+        if (convenioFiltro) {
+            const conv = f.convenio;
+            if (convenioFiltro === 'con_convenio' && !conv) return false;
+            if (convenioFiltro === 'sin_convenio' && conv) return false;
+            if (convenioFiltro === 'paga_hoy') {
+                if (!conv || !conv.proximoPago || !conv.proximoPago.esHoy) return false;
+            }
+            if (convenioFiltro === 'vencido') {
+                if (!conv || !conv.proximoPago || !conv.proximoPago.vencido) return false;
+            }
+            if (convenioFiltro === 'proxima_semana') {
+                if (!conv || !conv.proximoPago) return false;
+                const d = conv.proximoPago.diasAlProximo;
+                if (d < 0 || d > 7) return false;
             }
         }
         
@@ -565,9 +593,15 @@ function renderTabla(reset = true) {
             if (hace) html += ` <small style="color:#666;">(${hace})</small>`;
             html += '</div>';
             
-            // Botón de grabación si hay link
+            // Botón de grabación
             if (miToque.grabacionUrl) {
+                // Link directo (cuando el API REST funcione)
                 html += `<button onclick="abrirGrabacion('${miToque.grabacionUrl.replace(/'/g, "\\'")}', '${tel10}', '${escapeHtml(f.cliente).replace(/'/g, "\\'")}')" style="margin-top:3px;background:#E7F1FB;border:1px solid #B8DAFF;color:#0B5ED7;padding:2px 8px;border-radius:10px;cursor:pointer;font-size:11px;">🎧 Escuchar</button>`;
+            } else if (miToque.llamadaExitosa) {
+                // Sin link directo: abrir Zadarma stats con el numero filtrado
+                const fechaFiltro = fechaLlamada ? fechaLlamada.toISOString().slice(0,10).replace(/-/g, '.') : '';
+                const urlZadarma = `https://my.zadarma.com/mypbx/stat/`;
+                html += `<button onclick="window.open('${urlZadarma}', '_blank')" style="margin-top:3px;background:#FFF3E0;border:1px solid #FFB74D;color:#E65100;padding:2px 8px;border-radius:10px;cursor:pointer;font-size:11px;" title="Buscar grabación en Zadarma para ${tel10}">🎧 Ver en Zadarma</button>`;
             }
             bloques.push(html);
         }
@@ -577,6 +611,20 @@ function renderTabla(reset = true) {
             const resp = (miToque.respuesta || '').replace(/^\[.*?\]:\s*/, '').substring(0, 30);
             const respFull = (miToque.respuesta || '').replace(/'/g, "\\'");
             bloques.push(`<span style="color:#0F6E56;cursor:pointer;" title="${escapeHtml(miToque.respuesta || '')}" onclick="alert('Respuesta de ${escapeHtml(f.cliente).replace(/'/g, "\\'")}:\\n\\n${escapeHtml(miToque.respuesta || '').replace(/'/g, "\\'")}')">💬 ${escapeHtml(resp)}${resp.length >= 30 ? '...' : ''}</span>`);
+        }
+        
+        // ─── Bloque 2.5: Gestión manual (nota libre del usuario) ───
+        if (miToque && miToque.gestionManual) {
+            const nota = miToque.gestionManual.substring(0, 40);
+            const fechaMan = miToque.gestionManualFecha ? new Date(miToque.gestionManualFecha) : null;
+            let haceMan = '';
+            if (fechaMan) {
+                const min = Math.floor((Date.now() - fechaMan.getTime()) / 60000);
+                if (min < 60) haceMan = `${min}min`;
+                else if (min < 1440) haceMan = `${Math.floor(min/60)}h`;
+                else haceMan = `${Math.floor(min/1440)}d`;
+            }
+            bloques.push(`<div style="color:#6c5ce7;cursor:pointer;margin-top:3px;" title="${escapeHtml(miToque.gestionManual)}" onclick="alert('Gestión manual:\\n\\n${escapeHtml(miToque.gestionManual).replace(/'/g, "\\'")}')">✏️ ${escapeHtml(nota)}${miToque.gestionManual.length > 40 ? '...' : ''} <small style="color:#888">(${haceMan})</small></div>`);
         }
         
         // ─── Bloque 3: Si no hay nada de lo anterior, mostrar envío genérico ───
@@ -625,24 +673,59 @@ function renderTabla(reset = true) {
             ? `<button class="btn btn-sm btn-call" onclick="llamarIVR('${f.telefono}')" title="Llamada IVR">📞</button>`
             : '';
         
+        // ─── Columna Convenio ───
+        let convenioHTML = '<span style="color:#a8a8a3;">—</span>';
+        let rowStyle = '';
+        let convBadge = '';
+        if (f.convenio) {
+            const c = f.convenio;
+            const monto = c.pagoSemanal ? `$${c.pagoSemanal.toLocaleString('es-MX')}` : '';
+            const p = c.proximoPago;
+            
+            let urgencia = '';
+            let colorTxt = '#085041';
+            let tituloProx = '';
+            if (p) {
+                tituloProx = `Próximo pago: ${p.fecha}`;
+                if (p.vencido) {
+                    urgencia = `<div style="color:#A32D2D;font-weight:600;">⚠️ Vencido ${Math.abs(p.diasAlProximo)}d</div>`;
+                    colorTxt = '#A32D2D';
+                } else if (p.esHoy) {
+                    urgencia = `<div style="color:#0F6E56;font-weight:700;">🔔 PAGA HOY</div>`;
+                    colorTxt = '#0F6E56';
+                } else if (p.diasAlProximo <= 2) {
+                    urgencia = `<div style="color:#A85F0B;font-weight:600;">⏰ Paga en ${p.diasAlProximo}d</div>`;
+                    colorTxt = '#A85F0B';
+                } else {
+                    urgencia = `<div style="color:#5f5e5a;font-size:10px;">Próx: ${p.fecha}</div>`;
+                }
+            }
+            
+            convenioHTML = `<div style="font-size:11px;color:${colorTxt};font-weight:500;" title="${tituloProx}">📝 ${monto}/sem · ${c.semanas || '?'} sem</div>${urgencia}`;
+            rowStyle = 'background:#FFFBEB;';
+            convBadge = `<span style="background:#085041;color:white;padding:1px 6px;border-radius:8px;font-size:9px;margin-right:4px;font-weight:600;" title="Convenio activo">📝</span>`;
+        }
+        
         return `
-            <tr class="${isSel ? 'selected' : ''}" data-tel="${f.telefono}">
+            <tr class="${isSel ? 'selected' : ''}" data-tel="${f.telefono}" style="${rowStyle}">
                 <td class="checkbox-cell">
                     <input type="checkbox" ${isSel ? 'checked' : ''} onclick="toggleSeleccion('${f.telefono}', this)" />
                 </td>
                 <td><span class="cat cat-${f.categoria}">${f.categoria}</span></td>
-                <td>${flujoBadge}${escapeHtml(f.cliente)}</td>
+                <td>${flujoBadge}${convBadge}${escapeHtml(f.cliente)}</td>
                 <td class="mono">${f.telefono}</td>
                 <td class="text-right">${fmt(f.saldo)}</td>
                 <td class="text-right pct-${f.categoria}">${f.porcentajeAvance}%</td>
                 <td class="text-right">${f.diasAtraso}d</td>
                 <td style="font-size:11px;color:#5f5e5a">${escapeHtml((f.promotor || '').substring(0, 25))}</td>
+                <td>${convenioHTML}</td>
                 <td style="font-size:11px;">${toqueInfo}</td>
                 <td>
                     <div class="acciones-cell">
                         <button class="btn btn-sm btn-wa" onclick="abrirModal('${f.telefono}', 'link')" title="WhatsApp manual">📱</button>
                         ${btnAuto}
                         ${btnIVR}
+                        <button class="btn btn-sm" style="background:#6c5ce7;color:white;" onclick="abrirGestionManual('${f.telefono}', '${escapeHtml(f.cliente).replace(/'/g, "\\'")}')" title="Gestión manual">✏️</button>
                     </div>
                 </td>
             </tr>
@@ -1091,13 +1174,14 @@ function exportarExcel() {
     }
     
     // Crear CSV con los datos filtrados
-    const headers = ['Categoria','Cliente','Telefono','Saldo','% Pago','Dias Atraso','Promotor','Estado Envio','Respuesta','Resultado Llamada','Fecha Llamada','Tiene Grabacion','URL Grabacion'];
+    const headers = ['Categoria','Cliente','Telefono','Saldo','% Pago','Dias Atraso','Promotor','Tiene Convenio','Pago Semanal','Semanas','Proximo Pago','Estado Convenio','Estado Envio','Respuesta','Gestion Manual','Resultado Llamada','Fecha Llamada','Tiene Grabacion','URL Grabacion'];
     
     const rows = filtered.map(f => {
         const tel10 = f.telefono.slice(-10);
         const miToque = toquesMap[tel10] || toquesMap[f.telefono] || null;
         let estadoEnvio = 'Sin envío';
         let respuesta = '';
+        let gestionManual = '';
         let resultadoLlamada = '';
         let fechaLlamada = '';
         let tieneGrabacion = 'NO';
@@ -1113,6 +1197,9 @@ function exportarExcel() {
                 estadoEnvio = `Enviado ${canal} hace ${dias}d`;
             }
             
+            if (miToque.gestionManual) {
+                gestionManual = miToque.gestionManual.replace(/"/g, "'");
+            }
             if (miToque.llamadaResultado) {
                 resultadoLlamada = miToque.llamadaResultado.replace(/"/g, "'");
                 fechaLlamada = miToque.llamadaFecha ? new Date(miToque.llamadaFecha).toLocaleString('es-MX') : '';
@@ -1123,6 +1210,22 @@ function exportarExcel() {
             }
         }
         
+        // Datos de convenio
+        let tieneConvenio = 'NO';
+        let pagoSemanal = '';
+        let semanas = '';
+        let proximoPago = '';
+        let estadoConv = '';
+        if (f.convenio) {
+            tieneConvenio = 'SI';
+            pagoSemanal = f.convenio.pagoSemanal || '';
+            semanas = f.convenio.semanas || '';
+            proximoPago = f.convenio.proximoPago?.fecha || '';
+            estadoConv = f.convenio.estado || '';
+            if (f.convenio.proximoPago?.esHoy) estadoConv = 'PAGA HOY';
+            else if (f.convenio.proximoPago?.vencido) estadoConv = 'VENCIDO';
+        }
+        
         return [
             f.categoria,
             `"${(f.cliente || '').replace(/"/g, "'")}"`,
@@ -1131,8 +1234,14 @@ function exportarExcel() {
             f.porcentajeAvance + '%',
             f.diasAtraso,
             `"${(f.promotor || '').replace(/"/g, "'")}"`,
+            tieneConvenio,
+            pagoSemanal,
+            semanas,
+            proximoPago,
+            estadoConv,
             estadoEnvio,
             `"${respuesta}"`,
+            `"${gestionManual}"`,
             `"${resultadoLlamada}"`,
             `"${fechaLlamada}"`,
             tieneGrabacion,
@@ -1297,7 +1406,7 @@ async function exportarFlujo() {
 }
 
 let timer;
-['filtro-buscar', 'filtro-categoria', 'filtro-promotor', 'filtro-saldo', 'filtro-envio', 'filtro-llamada'].forEach(id => {
+['filtro-buscar', 'filtro-categoria', 'filtro-promotor', 'filtro-saldo', 'filtro-envio', 'filtro-llamada', 'filtro-convenio'].forEach(id => {
     const el = document.getElementById(id);
     if (el) {
         el.addEventListener('input', () => {
@@ -1313,6 +1422,104 @@ cargarDatos();
 // ═══════════════════════════════════════════════════════════════════════════
 // GRABACIONES + SINCRONIZACION ZADARMA
 // ═══════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GESTIÓN MANUAL (nota libre del usuario sobre un cliente)
+// ═══════════════════════════════════════════════════════════════════════════
+
+function abrirGestionManual(telefono, cliente) {
+    let modal = document.getElementById('modal-gestion-manual');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'modal-gestion-manual';
+        modal.style.cssText = 'display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:9999;align-items:center;justify-content:center;';
+        modal.onclick = function(e) { if (e.target === this) cerrarGestionManual(); };
+        modal.innerHTML = `
+            <div style="background:white;padding:24px;border-radius:8px;max-width:540px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.3);">
+                <h3 style="margin:0 0 12px;font-weight:500;color:#222;">✏️ Gestión manual</h3>
+                <div id="gestion-info" style="color:#666;margin-bottom:14px;font-size:13px;"></div>
+                <label style="display:block;margin-bottom:6px;font-size:13px;color:#555;">Nota de gestión:</label>
+                <textarea id="gestion-nota" rows="4" maxlength="500"
+                    placeholder="Ej: Cliente prometió pagar el viernes. Lo encontré en su domicilio..."
+                    style="width:100%;padding:10px;border:1px solid #ccc;border-radius:6px;font-family:inherit;font-size:13px;resize:vertical;"></textarea>
+                <div style="font-size:11px;color:#888;margin-top:4px;text-align:right;"><span id="gestion-counter">0</span>/500</div>
+                <div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px;">
+                    <button onclick="cerrarGestionManual()" style="background:#eee;color:#333;border:0;padding:8px 18px;border-radius:6px;cursor:pointer;">Cancelar</button>
+                    <button id="btn-guardar-gestion" onclick="guardarGestionManual()" style="background:#6c5ce7;color:white;border:0;padding:8px 18px;border-radius:6px;cursor:pointer;font-weight:500;">💾 Guardar</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+        
+        // Auto-counter
+        setTimeout(() => {
+            const ta = document.getElementById('gestion-nota');
+            if (ta) {
+                ta.addEventListener('input', () => {
+                    document.getElementById('gestion-counter').textContent = ta.value.length;
+                });
+            }
+        }, 100);
+    }
+    
+    document.getElementById('gestion-info').innerHTML = `📱 <strong>${telefono}</strong> · ${cliente || 'Cliente'}`;
+    document.getElementById('gestion-nota').value = '';
+    document.getElementById('gestion-counter').textContent = '0';
+    modal.dataset.telefono = telefono;
+    modal.dataset.cliente = cliente;
+    modal.style.display = 'flex';
+    setTimeout(() => document.getElementById('gestion-nota').focus(), 100);
+}
+
+function cerrarGestionManual() {
+    const modal = document.getElementById('modal-gestion-manual');
+    if (modal) modal.style.display = 'none';
+}
+
+async function guardarGestionManual() {
+    const modal = document.getElementById('modal-gestion-manual');
+    const tel = modal.dataset.telefono;
+    const nota = document.getElementById('gestion-nota').value.trim();
+    
+    if (!nota) {
+        alert('Escribe una nota antes de guardar.');
+        return;
+    }
+    
+    const btn = document.getElementById('btn-guardar-gestion');
+    btn.textContent = '⏳ Guardando...';
+    btn.disabled = true;
+    
+    try {
+        const r = await fetch('/api/gestion-manual', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ telefono: tel, nota, usuario: 'leo' })
+        });
+        const data = await r.json();
+        
+        if (data.success) {
+            cerrarGestionManual();
+            showToast('✅ Gestión registrada', 'success');
+            // Recargar mapa para que aparezca al instante
+            try {
+                const tRes = await fetch('/api/toques/mapa');
+                const tData = await tRes.json();
+                if (tData.success) {
+                    toquesMap = tData.mapa || {};
+                    renderTabla();
+                }
+            } catch(e) { /* ignore */ }
+        } else {
+            alert(`❌ Error: ${data.error || 'No se pudo guardar'}`);
+        }
+    } catch(e) {
+        alert(`❌ Error de red: ${e.message}`);
+    } finally {
+        btn.textContent = '💾 Guardar';
+        btn.disabled = false;
+    }
+}
 
 function abrirGrabacion(url, telefono, cliente) {
     let modal = document.getElementById('modal-grabacion');
