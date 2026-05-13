@@ -55,9 +55,120 @@ app.get('/api/config', (req, res) => {
 // API: Detector
 // ───────────────────────────────────────────────────────────────────────────
 
+// Helper: cargar convenios del GAS via fullSync (ya existente, no requiere cambios al GAS)
+async function cargarConveniosGAS() {
+    const url = process.env.GOOGLE_SCRIPT_URL;
+    if (!url) return [];
+    try {
+        const sep = url.includes('?') ? '&' : '?';
+        const r = await fetch(`${url}${sep}action=fullSync`, {
+            method: 'GET',
+            redirect: 'follow'
+        });
+        const txt = await r.text();
+        let data;
+        try { data = JSON.parse(txt); }
+        catch(e) { 
+            console.error('[Convenios] GAS no devolvio JSON:', txt.substring(0, 200));
+            return []; 
+        }
+        // fullSync devuelve { success, data: { clientes, pagos, convenios, promesas, ... } }
+        const arr = (data.data && data.data.convenios) || data.convenios || [];
+        console.log(`[Convenios] Cargados ${arr.length} convenios via fullSync`);
+        return arr;
+    } catch(e) {
+        console.error('[Convenios] Error cargando del GAS:', e.message);
+        return [];
+    }
+}
+
+// Helper: indexar convenios por telefono (10 ultimos digitos)
+function indexarConveniosPorTel(convenios) {
+    const mapa = {};
+    for (const c of convenios) {
+        const tel = String(c.Teléfono || c.telefono || c.Telefono || '').replace(/\D/g, '').slice(-10);
+        if (!tel) continue;
+        const estado = String(c.estado || c.Estado || '').toLowerCase();
+        // Saltar convenios cancelados
+        if (estado === 'cancelado') continue;
+        // Si hay varios para el mismo cliente, preferir el activo
+        const existente = mapa[tel];
+        if (!existente || estado === 'activo' || estado === 'vigente') {
+            mapa[tel] = c;
+        }
+    }
+    return mapa;
+}
+
+// Helper: calcular proximo pago a partir de fechaInicio + semanas y pagos reales
+function calcularProximoPago(convenio) {
+    try {
+        const fechaInicioRaw = convenio.fechaInicio || convenio.FechaInicio;
+        if (!fechaInicioRaw) return null;
+        const fechaInicio = new Date(fechaInicioRaw);
+        if (isNaN(fechaInicio.getTime())) return null;
+        
+        const pagoSemanal = parseFloat(convenio.pagoSemanal || 0);
+        const semanas = parseInt(convenio.semanas || 0);
+        if (pagoSemanal <= 0) return null;
+        
+        const ahora = new Date();
+        const diasDesdeInicio = Math.floor((ahora - fechaInicio) / 86400000);
+        const semanasTranscurridas = Math.floor(diasDesdeInicio / 7);
+        
+        // Proximo pago programado = inicio + (semanasTranscurridas+1)*7 dias
+        const proximo = new Date(fechaInicio);
+        proximo.setDate(proximo.getDate() + (semanasTranscurridas + 1) * 7);
+        
+        const diasAlProximo = Math.floor((proximo - ahora) / 86400000);
+        return {
+            fecha: proximo.toISOString().slice(0, 10),
+            diasAlProximo,
+            vencido: diasAlProximo < 0,
+            esHoy: diasAlProximo === 0,
+            semanasTranscurridas,
+            semanasTotal: semanas
+        };
+    } catch(e) {
+        return null;
+    }
+}
+
 app.get('/api/detectar', async (req, res) => {
     try {
         const resultado = await detectarFantasmas();
+        
+        // ═══ Cargar convenios y mergearlos a fantasmas ═══
+        try {
+            const convenios = await cargarConveniosGAS();
+            const mapaConvenios = indexarConveniosPorTel(convenios);
+            const fantasmasArrTmp = resultado.fantasmas || [];
+            let conveniosAplicados = 0;
+            
+            for (const f of fantasmasArrTmp) {
+                const tel10 = String(f.telefono).replace(/\D/g, '').slice(-10);
+                const conv = mapaConvenios[tel10];
+                if (conv) {
+                    const proxPago = calcularProximoPago(conv);
+                    f.convenio = {
+                        id: conv.id || conv.ID || '',
+                        pagoSemanal: parseFloat(conv.pagoSemanal || 0),
+                        semanas: parseInt(conv.semanas || 0),
+                        fechaInicio: conv.fechaInicio || '',
+                        fechaFin: conv.fechaFin || '',
+                        estado: conv.estado || 'activo',
+                        notas: conv.notas || '',
+                        proximoPago: proxPago
+                    };
+                    conveniosAplicados++;
+                }
+            }
+            resultado.totalConvenios = convenios.length;
+            resultado.conveniosAplicados = conveniosAplicados;
+            console.log(`[Server] Convenios aplicados a ${conveniosAplicados} fantasmas (de ${convenios.length} convenios totales)`);
+        } catch(convErr) {
+            console.error('[Server] Error mergeando convenios (no critico):', convErr.message);
+        }
         
         // Mejora: incluir clientes que estan en flujo activo del AutoRunner
         // El detector los excluye por defecto. Los recuperamos para que aparezcan
@@ -391,6 +502,46 @@ app.post('/api/respuesta-cliente', async (req, res) => {
         res.json({ success: true });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// API: Resultado de llamada (recibido desde el bridge IVR / Zadarma webhook)
+// ───────────────────────────────────────────────────────────────────────────
+
+// ───────────────────────────────────────────────────────────────────────────
+// API: Gestion manual del usuario (nota libre sobre un cliente)
+// ───────────────────────────────────────────────────────────────────────────
+
+app.post('/api/gestion-manual', async (req, res) => {
+    try {
+        const { telefono, nota, usuario } = req.body || {};
+        if (!telefono || !nota || nota.trim().length === 0) {
+            return res.status(400).json({ success: false, error: 'telefono y nota son requeridos' });
+        }
+        const tel10 = String(telefono).replace(/\D/g, '').slice(-10);
+        const notaLimpia = String(nota).trim().substring(0, 500);
+        const usr = String(usuario || 'manual').substring(0, 50);
+        
+        // Buscar seguimiento_id activo si existe
+        const flujo = await pool.query(`
+            SELECT id FROM seguimiento_clientes
+            WHERE telefono = $1 AND estado IN ('pendiente', 'en_curso', 'respondido')
+            LIMIT 1
+        `, [tel10]);
+        const seguimientoId = flujo.rows[0]?.id || null;
+        
+        await pool.query(`
+            INSERT INTO seguimiento_log
+                (seguimiento_id, telefono, tipo, canal, mensaje, exitoso, disparado_por)
+            VALUES ($1, $2, 'gestion_manual', 'manual', $3, true, $4)
+        `, [seguimientoId, tel10, `✏️ ${notaLimpia}`, usr]);
+        
+        console.log(`✏️ Gestion manual ${tel10}: ${notaLimpia.substring(0, 60)}`);
+        res.json({ success: true, mensaje: notaLimpia });
+    } catch(e) {
+        console.error('[Server] Error en /api/gestion-manual:', e);
+        res.status(500).json({ success: false, error: e.message });
     }
 });
 
@@ -802,6 +953,15 @@ app.get('/api/toques/mapa', async (req, res) => {
             ORDER BY telefono, creado_en DESC
         `);
         
+        // Ultima gestion manual por telefono
+        const manuales = await pool.query(`
+            SELECT DISTINCT ON (telefono)
+                telefono, mensaje, creado_en, disparado_por
+            FROM seguimiento_log
+            WHERE tipo = 'gestion_manual'
+            ORDER BY telefono, creado_en DESC
+        `);
+        
         const mapa = {};
         envios.rows.forEach(row => {
             const tel10 = row.telefono.slice(-10);
@@ -873,6 +1033,31 @@ app.get('/api/toques/mapa', async (req, res) => {
                     mapa[tel10].respuesta = resultado;
                     mapa[tel10].fechaRespuesta = row.creado_en;
                 }
+            }
+        });
+        
+        // Agregar gestiones manuales (notas libres del usuario)
+        manuales.rows.forEach(row => {
+            const tel10 = row.telefono.slice(-10);
+            const nota = (row.mensaje || '').replace(/^✏️\s*/, '');
+            if (!mapa[tel10]) {
+                mapa[tel10] = {
+                    canal: 'manual',
+                    fecha: row.creado_en,
+                    respondio: false,
+                    respuesta: null,
+                    llamadaResultado: null,
+                    llamadaExitosa: null,
+                    grabacionUrl: null,
+                    gestionManual: nota,
+                    gestionManualFecha: row.creado_en,
+                    gestionManualUsuario: row.disparado_por
+                };
+                mapa[row.telefono] = mapa[tel10];
+            } else {
+                mapa[tel10].gestionManual = nota;
+                mapa[tel10].gestionManualFecha = row.creado_en;
+                mapa[tel10].gestionManualUsuario = row.disparado_por;
             }
         });
         
