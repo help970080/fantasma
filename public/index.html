@@ -701,7 +701,7 @@ function renderTabla(reset = true) {
                 }
             }
             
-            convenioHTML = `<div style="font-size:11px;color:${colorTxt};font-weight:500;" title="${tituloProx}">📝 ${monto}/sem · ${c.semanas || '?'} sem</div>${urgencia}`;
+            convenioHTML = `<div style="font-size:11px;color:${colorTxt};font-weight:500;" title="${tituloProx}">📝 ${monto}/sem · ${c.semanas || '?'} sem</div>${urgencia}<button onclick="enviarMensajeConvenio('${f.telefono}', '${escapeHtml(f.cliente).replace(/'/g, "\\'")}')" style="margin-top:4px;background:#0F6E56;border:0;color:white;padding:3px 8px;border-radius:8px;cursor:pointer;font-size:10px;font-weight:500;" title="Enviar recordatorio con datos de pago OXXO/BBVA">💰 Recordar</button>`;
             rowStyle = 'background:#FFFBEB;';
             convBadge = `<span style="background:#085041;color:white;padding:1px 6px;border-radius:8px;font-size:9px;margin-right:4px;font-weight:600;" title="Convenio activo">📝</span>`;
         }
@@ -1032,19 +1032,35 @@ async function enviarLoteWA() {
         `Elige el tipo de mensaje:\n` +
         `  1 = Cordial (primer recordatorio)\n` +
         `  3 = Firme (segundo aviso)\n` +
-        `  5 = Urgente (último intento)\n\n` +
+        `  5 = Urgente (último intento)\n` +
+        `  7 = Recordatorio CONVENIO (datos de pago OXXO/BBVA)\n\n` +
         `Tiempo estimado: ~${Math.ceil(seleccionados.length * 0.75)} min (30-60s entre c/u)\n\n` +
-        `Escribe 1, 3 o 5:`, '1');
+        `Escribe 1, 3, 5 o 7:`, '1');
     
     if (!pasoElegido) return; // Canceló
     
     const paso = parseInt(pasoElegido);
-    if (![1, 3, 5].includes(paso)) {
-        showToast('Paso inválido. Usa 1, 3 o 5.', 'error');
+    if (![1, 3, 5, 7].includes(paso)) {
+        showToast('Paso inválido. Usa 1, 3, 5 o 7.', 'error');
         return;
     }
     
-    const nombres = { 1: 'Cordial', 3: 'Firme', 5: 'Urgente' };
+    const nombres = { 1: 'Cordial', 3: 'Firme', 5: 'Urgente', 7: 'Convenio' };
+    
+    // Si es paso 7 (convenio), filtrar solo clientes con convenio activo
+    if (paso === 7) {
+        const conConvenio = seleccionados.filter(f => f.convenio);
+        const sinConvenio = seleccionados.length - conConvenio.length;
+        if (conConvenio.length === 0) {
+            showToast('Ninguno de los seleccionados tiene convenio activo', 'error');
+            return;
+        }
+        if (sinConvenio > 0) {
+            if (!confirm(`De los ${seleccionados.length} seleccionados, solo ${conConvenio.length} tienen convenio activo.\n${sinConvenio} serán omitidos.\n\n¿Continuar enviando a los ${conConvenio.length} con convenio?`)) return;
+        }
+        seleccionados.length = 0;
+        seleccionados.push(...conConvenio);
+    }
     
     if (!confirm(`¿Confirmar envío "${nombres[paso]}" (Paso ${paso}) a ${seleccionados.length} clientes?`)) return;
     
@@ -1059,6 +1075,12 @@ async function enviarLoteWA() {
         actualizarProgreso(i, seleccionados.length, enviados, errores, `Enviando a ${f.cliente || f.telefono}...`);
         
         try {
+            // Si es paso 7 (convenio), generar mensaje personalizado con datos del convenio
+            let mensajePersonalizado = null;
+            if (paso === 7 && f.convenio) {
+                mensajePersonalizado = generarMensajeConvenio(f);
+            }
+            
             const res = await fetch('/api/enviar/whatsapp-auto', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -1067,7 +1089,8 @@ async function enviarLoteWA() {
                     cliente: f.cliente,
                     saldo: f.saldo,
                     diasAtraso: f.diasAtraso,
-                    paso: paso
+                    paso: paso,
+                    ...(mensajePersonalizado && { mensajePersonalizado })
                 })
             });
             const data = await res.json();
@@ -1415,6 +1438,82 @@ let timer;
         });
     }
 });
+
+async function enviarMensajeConvenio(telefono, cliente) {
+    const f = allFantasmas.find(x => x.telefono === telefono);
+    if (!f || !f.convenio) {
+        showToast('Este cliente no tiene convenio activo', 'error');
+        return;
+    }
+    
+    const mensaje = generarMensajeConvenio(f);
+    const preview = mensaje.substring(0, 200) + '...';
+    
+    if (!confirm(`Enviar recordatorio de convenio a:\n${cliente}\n${telefono}\n\nPreview:\n\n${preview}\n\n¿Confirmar envío vía WhatsApp Auto?`)) return;
+    
+    showToast('⏳ Enviando...', 'success');
+    
+    try {
+        const res = await fetch('/api/enviar/whatsapp-auto', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                telefono: telefono,
+                cliente: cliente,
+                saldo: f.saldo,
+                diasAtraso: f.diasAtraso,
+                paso: 7,
+                mensajePersonalizado: mensaje
+            })
+        });
+        const data = await res.json();
+        
+        if (data.success) {
+            showToast(`💰 Recordatorio enviado a ${cliente}`, 'success');
+        } else {
+            showToast(`❌ ${data.error || 'Error al enviar'}`, 'error');
+        }
+    } catch(e) {
+        showToast(`❌ ${e.message}`, 'error');
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GENERADOR DE MENSAJE PARA RECORDATORIO DE CONVENIO
+// ═══════════════════════════════════════════════════════════════════════════
+
+function generarMensajeConvenio(f) {
+    const cliente = (f.cliente || '').split(' ')[0] || 'estimado(a)';
+    const c = f.convenio || {};
+    const pago = c.pagoSemanal || 0;
+    const p = c.proximoPago;
+    const pagoFmt = pago.toLocaleString('es-MX', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+    
+    let urgencia = '';
+    if (p) {
+        if (p.esHoy) {
+            urgencia = '🔔 *Tu pago vence HOY*';
+        } else if (p.vencido) {
+            urgencia = `⚠️ *Tu pago está vencido por ${Math.abs(p.diasAlProximo)} día(s)*`;
+        } else if (p.diasAlProximo === 1) {
+            urgencia = '⏰ *Tu pago vence MAÑANA*';
+        } else if (p.diasAlProximo <= 3) {
+            urgencia = `⏰ *Tu pago vence en ${p.diasAlProximo} días*`;
+        } else {
+            urgencia = `📅 *Tu próximo pago es el ${p.fecha}*`;
+        }
+    }
+    
+    return `Hola ${cliente}, le saluda LeGaXi Asociados.\n\n` +
+           `${urgencia}\n\n` +
+           `Monto a pagar: *$${pagoFmt}*\n\n` +
+           `Realiza el pago de tu convenio por:\n\n` +
+           `🏪 *OXXO ó Transferencia BBVA*\n` +
+           `📌 Cuenta: *4152 3143 7377 5678*\n` +
+           `👤 A nombre de: *Lic. Francisco Gabriel Garcia Sanchez*\n\n` +
+           `Por favor envía el comprobante a este mismo número en cuanto realices el pago.\n\n` +
+           `Gracias por mantener su convenio al corriente.`;
+}
 
 cargarConfig();
 cargarDatos();
