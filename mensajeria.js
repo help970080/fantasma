@@ -23,6 +23,11 @@ const CHATBOT_TOKEN = process.env.CHATBOT_BAILEYS_TOKEN || '';
 const IVR_URL = process.env.IVR_ZADARMA_URL || '';
 const IVR_TOKEN = process.env.IVR_ZADARMA_TOKEN || '';
 
+// NUEVO: URL del bot conversacional (deriva de IVR_URL cambiando /api/llamar por /api/llamar-bot)
+// Ejemplo: si IVR_URL=https://ivr.legaxia.uk/api/llamar
+// → IVR_BOT_URL=https://ivr.legaxia.uk/api/llamar-bot
+const IVR_BOT_URL = process.env.IVR_BOT_URL || (IVR_URL ? IVR_URL.replace(/\/api\/llamar$/, '/api/llamar-bot') : '');
+
 // Numero de empresa para wa.me (sin +, con codigo pais)
 const NUMERO_EMPRESA = process.env.NUMERO_EMPRESA || '525544621100';
 
@@ -276,6 +281,71 @@ async function llamarPorIVR({ seguimientoId, telefono, paso, cliente, saldo, dia
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// MODO 4: LLAMADA CON BOT CONVERSACIONAL (Vosk + STT)
+// Usa el endpoint /api/llamar-bot del Bridge - bot escucha y reacciona
+// ───────────────────────────────────────────────────────────────────────────
+
+async function llamarPorBot({ seguimientoId, telefono, paso, cliente, saldo, diasAtraso }) {
+    if (!IVR_BOT_URL) {
+        return { exitoso: false, error: 'IVR_BOT_URL no configurado (deriva de IVR_ZADARMA_URL)' };
+    }
+    
+    try {
+        const tel = String(telefono).replace(/\D/g, '');
+        const telConPais = tel.length === 10 ? '52' + tel : tel;
+        
+        const headers = { 'Content-Type': 'application/json' };
+        if (IVR_TOKEN) headers['Authorization'] = `Bearer ${IVR_TOKEN}`;
+        
+        const res = await fetch(IVR_BOT_URL, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+                telefono: telConPais,
+                nombre: cliente || '',
+                saldo: saldo || 0,
+                diasAtraso: diasAtraso || 0
+            }),
+            timeout: 30000
+        });
+        
+        const data = await res.json().catch(() => ({}));
+        const exitoso = res.ok && (data.success !== false);
+        
+        await registrarLog({
+            seguimientoId, telefono,
+            tipo: 'toque_enviado',
+            canal: 'llamada_bot',          // ← Canal nuevo para identificar
+            paso,
+            mensaje: `🤖 Bot conversacional a ${cliente || telefono}`,
+            exitoso,
+            errorDetalle: exitoso ? null : (data.error || `HTTP ${res.status}`),
+            apiResponse: data,
+            disparadoPor: 'panel_manual'
+        });
+        
+        if (exitoso && seguimientoId && paso) {
+            await actualizarSeguimientoTrasEnvio(seguimientoId, paso, 'llamada_bot');
+        }
+        
+        return { exitoso, data, status: res.status, modo: 'bot_conversacional' };
+        
+    } catch (error) {
+        await registrarLog({
+            seguimientoId, telefono,
+            tipo: 'toque_enviado',
+            canal: 'llamada_bot',
+            paso,
+            mensaje: `🤖 Bot conversacional a ${cliente || telefono}`,
+            exitoso: false,
+            errorDetalle: error.message,
+            disparadoPor: 'panel_manual'
+        });
+        return { exitoso: false, error: error.message };
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 // HELPER: GENERAR MENSAJE SEGUN PASO
 // ───────────────────────────────────────────────────────────────────────────
 
@@ -305,6 +375,7 @@ function getConfig() {
         whatsappLink: true,  // Siempre disponible
         whatsappBaileys: !!CHATBOT_URL,
         llamadaIVR: !!IVR_URL,
+        llamadaBot: !!IVR_BOT_URL,         // ← NUEVO: indica si bot está disponible
         numeroEmpresa: NUMERO_EMPRESA,
         plantillas: Object.keys(PLANTILLAS_WHATSAPP)
     };
@@ -315,6 +386,7 @@ module.exports = {
     registrarEnvioLink,
     enviarPorBaileys,
     llamarPorIVR,
+    llamarPorBot,                   // ← NUEVO
     generarMensajePorPaso,
     getConfig,
     PLANTILLAS_WHATSAPP
