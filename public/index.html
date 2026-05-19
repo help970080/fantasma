@@ -134,6 +134,70 @@ input[type="checkbox"] { cursor: pointer; }
 }
 .modal textarea { min-height: 150px; resize: vertical; line-height: 1.5; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+
+/* Switch Bot Conversacional */
+.bot-switch-container {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 14px;
+    background: white;
+    border: 0.5px solid rgba(0,0,0,0.3);
+    border-radius: 8px;
+    margin-left: 8px;
+}
+.bot-switch-container.active {
+    background: #EAF3DE;
+    border-color: #97C459;
+}
+.bot-switch {
+    position: relative;
+    display: inline-block;
+    width: 44px;
+    height: 22px;
+}
+.bot-switch input { opacity: 0; width: 0; height: 0; }
+.bot-switch-slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background-color: #ccc;
+    border-radius: 22px;
+    transition: 0.3s;
+}
+.bot-switch-slider:before {
+    position: absolute;
+    content: "";
+    height: 16px;
+    width: 16px;
+    left: 3px;
+    bottom: 3px;
+    background-color: white;
+    border-radius: 50%;
+    transition: 0.3s;
+}
+.bot-switch input:checked + .bot-switch-slider {
+    background-color: #10b981;
+}
+.bot-switch input:checked + .bot-switch-slider:before {
+    transform: translateX(22px);
+}
+.bot-switch-label {
+    font-size: 13px;
+    color: #2c2c2a;
+    user-select: none;
+    cursor: pointer;
+}
+.bot-switch-status {
+    font-size: 11px;
+    color: #888;
+    margin-left: 4px;
+}
+.bot-switch-container.active .bot-switch-status {
+    color: #10b981;
+    font-weight: 500;
+}
+
 </style>
 </head>
 <body>
@@ -237,6 +301,14 @@ input[type="checkbox"] { cursor: pointer; }
         <button class="btn" onclick="marcarSeleccionados()">Marcar seguimiento</button>
         <button class="btn btn-wa" id="btn-wa-lote" onclick="enviarLoteWA()">📤 WA a seleccionados</button>
         <button class="btn btn-call" id="btn-ivr-lote" onclick="enviarLoteIVR()">📞 IVR a seleccionados</button>
+        <div class="bot-switch-container" id="bot-switch-container">
+            <label class="bot-switch">
+                <input type="checkbox" id="modoBot" onchange="toggleModoBot()">
+                <span class="bot-switch-slider"></span>
+            </label>
+            <label for="modoBot" class="bot-switch-label">🤖 Bot</label>
+            <span class="bot-switch-status" id="bot-switch-status">OFF</span>
+        </div>
     </div>
 </div>
 
@@ -380,6 +452,48 @@ let selectedTelefonos = new Set();
 let config = { whatsappLink: true, whatsappBaileys: false, llamadaIVR: false };
 let modalCliente = null;
 let toquesMap = {}; // Mapa de ultimo toque por telefono
+
+// ═══════════════════════════════════════════════
+// MODO BOT CONVERSACIONAL (switch global)
+// ═══════════════════════════════════════════════
+let modoBotActivo = false;
+
+function cargarModoBot() {
+    modoBotActivo = localStorage.getItem('legaxi_modo_bot') === 'true';
+    const checkbox = document.getElementById('modoBot');
+    if (checkbox) {
+        checkbox.checked = modoBotActivo;
+        actualizarIndicadorBot();
+    }
+}
+
+function toggleModoBot() {
+    modoBotActivo = document.getElementById('modoBot').checked;
+    localStorage.setItem('legaxi_modo_bot', modoBotActivo);
+    actualizarIndicadorBot();
+    if (modoBotActivo) {
+        showToast('🤖 Modo Bot Conversacional ACTIVADO. Las llamadas usarán el bot Vosk+STT.', 'success');
+    } else {
+        showToast('Modo TTS estático activado (modo normal)', '');
+    }
+}
+
+function actualizarIndicadorBot() {
+    const cont = document.getElementById('bot-switch-container');
+    const stat = document.getElementById('bot-switch-status');
+    if (modoBotActivo) {
+        cont.classList.add('active');
+        stat.textContent = '🤖 ACTIVO';
+    } else {
+        cont.classList.remove('active');
+        stat.textContent = 'OFF';
+    }
+}
+
+// Cargar al iniciar
+document.addEventListener('DOMContentLoaded', cargarModoBot);
+
+
 
 function fmt(n) { return '$' + Math.round(n).toLocaleString('es-MX'); }
 
@@ -936,7 +1050,8 @@ async function enviarPorAuto() {
 async function llamarIVR(telefono) {
     const f = allFantasmas.find(x => x.telefono === telefono);
     if (!f) return;
-    if (!confirm(`¿Iniciar llamada IVR a ${f.cliente}?`)) return;
+    const tipoLlamada = modoBotActivo ? '🤖 Bot Conversacional' : '📞 IVR (TTS estático)';
+    if (!confirm(`¿Iniciar llamada ${tipoLlamada} a ${f.cliente}?`)) return;
     
     try {
         const res = await fetch('/api/enviar/llamada-ivr', {
@@ -947,11 +1062,12 @@ async function llamarIVR(telefono) {
                 cliente: f.cliente,
                 saldo: f.saldo,
                 diasAtraso: f.diasAtraso,
-                paso: 2
+                paso: 2,
+                useBot: modoBotActivo  // ← NUEVO: indica al server qué modo usar
             })
         });
         const data = await res.json();
-        if (data.success) showToast('✓ Llamada IVR iniciada', 'success');
+        if (data.success) showToast('✓ ' + tipoLlamada + ' iniciada', 'success');
         else showToast('Error: ' + (data.error || 'desconocido'), 'error');
     } catch (err) {
         showToast('Error: ' + err.message, 'error');
@@ -1135,7 +1251,8 @@ async function enviarLoteIVR() {
     
     const seleccionados = allFantasmas.filter(f => selectedTelefonos.has(f.telefono));
     
-    if (!confirm(`¿Llamar a ${seleccionados.length} clientes vía IVR?\n\nSe hará 1 llamada cada 10 seg.\nTiempo estimado: ~${Math.ceil(seleccionados.length * 0.17)} minutos\n\n⚠️ Asegúrate de tener tu PC prendida con el bridge corriendo.`)) return;
+    const tipoLote = modoBotActivo ? '🤖 Bot Conversacional' : '📞 IVR (TTS estático)';
+    if (!confirm(`¿Llamar a ${seleccionados.length} clientes vía ${tipoLote}?\n\nSe hará 1 llamada cada 10 seg.\nTiempo estimado: ~${Math.ceil(seleccionados.length * 0.17)} minutos\n\n⚠️ Asegúrate de tener tu PC prendida con el bridge corriendo.`)) return;
     
     abrirProgreso(`Llamando a ${seleccionados.length} clientes via IVR`, seleccionados.length);
     
@@ -1156,7 +1273,8 @@ async function enviarLoteIVR() {
                     cliente: f.cliente,
                     saldo: f.saldo,
                     diasAtraso: f.diasAtraso,
-                    paso: 2
+                    paso: 2,
+                    useBot: modoBotActivo
                 })
             });
             const data = await res.json();
