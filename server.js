@@ -425,7 +425,7 @@ app.post('/api/enviar/whatsapp-auto', async (req, res) => {
 
 app.post('/api/enviar/llamada-ivr', async (req, res) => {
     try {
-        const { telefono, cliente, saldo, diasAtraso, paso } = req.body;
+        const { telefono, cliente, saldo, diasAtraso, paso, useBot } = req.body;
         
         if (!telefono) {
             return res.status(400).json({ success: false, error: 'Telefono requerido' });
@@ -439,14 +439,23 @@ app.post('/api/enviar/llamada-ivr', async (req, res) => {
         
         const seguimientoId = flujo.rows[0]?.id || null;
         
-        const result = await mensajeria.llamarPorIVR({
+        const params = {
             seguimientoId,
             telefono,
             paso: parseInt(paso) || 1,
             cliente,
             saldo: parseFloat(saldo) || 0,
             diasAtraso: parseInt(diasAtraso) || 0
-        });
+        };
+        
+        // ─── NUEVO: useBot decide qué función usar ───
+        let result;
+        if (useBot) {
+            console.log('[Server] 🤖 Modo BOT solicitado para ' + telefono);
+            result = await mensajeria.llamarPorBot(params);
+        } else {
+            result = await mensajeria.llamarPorIVR(params);
+        }
         
         res.json({ success: result.exitoso, ...result });
         
